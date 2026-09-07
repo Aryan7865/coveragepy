@@ -28,8 +28,12 @@ Unreleased
   ``else:`` body removes the ``else:`` line.  Previously the ``case`` line was
   left behind and reported as missing.  Closes `issue 1563`_ with `pull 2269`_.
 
+- Fix: using :meth:`.CoverageData.update` twice on an in-memory database would
+  fail, as described in `issue 2279`_. This is now fixed.
+
 .. _issue 1563: https://github.com/coveragepy/coveragepy/issues/1563
 .. _pull 2269: https://github.com/coveragepy/coveragepy/pull/2269
+.. _issue 2279: https://github.com/coveragepy/coveragepy/issues/2279
 
 .. start-releases
 
