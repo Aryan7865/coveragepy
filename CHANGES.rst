@@ -20,8 +20,12 @@ upgrading your version of coverage.py.
     ..  Version 9.8.1 — 2027-07-27
     ..  --------------------------
 
-Unreleased
-----------
+.. start-releases
+
+.. _changes_7-16-1:
+
+Version 7.16.1 — 2026-09-13
+---------------------------
 
 - Fix: when the body of an irrefutable ``case`` (like ``case _:``) is entirely
   excluded, the ``case`` line is now excluded too, just as an excluded
@@ -34,8 +38,6 @@ Unreleased
 .. _issue 1563: https://github.com/coveragepy/coveragepy/issues/1563
 .. _pull 2269: https://github.com/coveragepy/coveragepy/pull/2269
 .. _issue 2279: https://github.com/coveragepy/coveragepy/issues/2279
-
-.. start-releases
 
 .. _changes_7-16-0:
 
