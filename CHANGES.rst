@@ -23,7 +23,11 @@ upgrading your version of coverage.py.
 Unreleased
 ----------
 
-Nothing yet.
+- Fix: on Python 3.14 and later, a ``for`` loop completing immediately before a
+  function return could mistakenly report an uncovered branch. This is now
+  fixed, closing `issue 2168`_.
+
+.. _issue 2168: https://github.com/coveragepy/coveragepy/issues/2168
 
 
 .. start-releases
