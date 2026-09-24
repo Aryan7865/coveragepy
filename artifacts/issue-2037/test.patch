@@ -1,0 +1,1247 @@
+diff --git a/test.sh b/test.sh
+new file mode 100755
+index 000000000..9e80e6925
+--- /dev/null
++++ b/test.sh
+@@ -0,0 +1,109 @@
++#!/usr/bin/env bash
++# Run the test suites.
++#
++# Usage:
++#   ./test.sh [--output_path <junit.xml>] <base|new>
++#
++#   base  the existing tests for the measurement, data, combining and reporting
++#         code.
++#   new   the tests for recording when lines and branches are first executed.
++set -uo pipefail
++
++OUTPUT_PATH="results.xml"
++MODE=""
++while [[ $# -gt 0 ]]; do
++    case "$1" in
++        --output_path)
++            OUTPUT_PATH="$2"
++            shift 2
++            ;;
++        --output_path=*)
++            OUTPUT_PATH="${1#*=}"
++            shift
++            ;;
++        base|new)
++            MODE="$1"
++            shift
++            ;;
++        *)
++            echo "Unknown argument: $1" >&2
++            echo "Usage: $0 [--output_path <junit.xml>] <base|new>" >&2
++            exit 2
++            ;;
++    esac
++done
++
++if [[ -z "$MODE" ]]; then
++    echo "Usage: $0 [--output_path <junit.xml>] <base|new>" >&2
++    exit 2
++fi
++
++cd "$(dirname "${BASH_SOURCE[0]}")"
++
++# The C tracer is compiled in place, so rebuild it to pick up source changes.
++if ! python setup.py -q build_ext --inplace >/tmp/build_ext.log 2>&1; then
++    echo "Warning: couldn't build the C extension:" >&2
++    cat /tmp/build_ext.log >&2
++fi
++
++# Like igor.py, run the tests with an explicit core: the C tracer if it's
++# available, otherwise the Python tracer.
++if [[ -z "${COVERAGE_CORE:-}" ]]; then
++    if python -c "import coverage.tracer" >/dev/null 2>&1; then
++        export COVERAGE_CORE=ctrace
++    else
++        export COVERAGE_CORE=pytrace
++    fi
++fi
++
++case "$MODE" in
++    base)
++        TESTS=(
++            tests/test_api.py
++            tests/test_arcs.py
++            tests/test_cmdline.py
++            tests/test_collector.py
++            tests/test_concurrency.py
++            tests/test_config.py
++            tests/test_context.py
++            tests/test_core.py
++            tests/test_coverage.py
++            tests/test_data.py
++            tests/test_debug.py
++            tests/test_html.py
++            tests/test_json.py
++            tests/test_lcov.py
++            tests/test_misc.py
++            tests/test_numbits.py
++            tests/test_oddball.py
++            tests/test_plugins.py
++            tests/test_process.py
++            tests/test_report.py
++            tests/test_results.py
++            tests/test_sqlitedb.py
++            tests/test_sysmon.py
++            tests/test_xml.py
++        )
++        DESELECT=(
++            # Checks unreadable files, which root can read anyway.
++            --deselect "tests/test_api.py::ApiTest::test_combining_bad_data[noperms-unable to open database file|Could not open database]"
++            # Depends on the environment passed through exec/spawn calls, and
++            # fails the same way without any changes to coverage.py.
++            --deselect tests/test_process.py::ExecvTest::test_execv_patch
++        )
++        ;;
++    new)
++        TESTS=(
++            tests/test_timestamps.py
++        )
++        DESELECT=()
++        ;;
++esac
++
++python -m pytest \
++    -p no:cacheprovider \
++    -o addopts="" \
++    -q -rfEX -n auto --dist loadgroup -p no:legacypath --no-flaky-report \
++    --junitxml="$OUTPUT_PATH" \
++    "${DESELECT[@]}" \
++    "${TESTS[@]}"
+diff --git a/tests/test_timestamps.py b/tests/test_timestamps.py
+new file mode 100644
+index 000000000..148de8414
+--- /dev/null
++++ b/tests/test_timestamps.py
+@@ -0,0 +1,1126 @@
++# Licensed under the Apache License: http://www.apache.org/licenses/LICENSE-2.0
++# For details: https://github.com/coveragepy/coveragepy/blob/main/NOTICE.txt
++
++"""Tests for recording when lines and arcs were first executed."""
++
++from __future__ import annotations
++
++import json
++import sys
++import time
++from types import ModuleType
++from typing import Any
++
++import pytest
++
++import coverage
++from coverage import Coverage, CoverageData, env
++from coverage.core import CTRACER_FILE
++from coverage.files import abs_file
++from coverage.misc import import_local_file
++from coverage.types import TArc, TLineNo
++
++from tests.coveragetest import CoverageTest
++
++# A helper module for the measured programs.  tick() returns a time that is
++# later than everything that happened before the call, and earlier than
++# everything that happens after it.
++CLOCK_PY = """\
++import time
++
++def tick():
++    now = later = time.time()
++    while later <= now:
++        later = time.time()
++    return now
++"""
++
++# The measured code.  Line numbers matter to the tests:
++#   3: the `if`, 4: the true branch, 6: the false branch, 7: the return.
++WORK_PY = """\
++def work(x):
++    total = 0
++    if x:
++        total += 1
++    else:
++        total += 2
++    return total
++
++class Thing:
++    def method(self):
++        return work(True)
++"""
++
++# A program that runs the true branch, ticks, then runs both branches.
++PROG_PY = """\
++import clock
++import work
++
++work.work(True)
++mark = clock.tick()
++work.work(True)
++work.work(False)
++"""
++
++# A program that only runs the true branch.
++TRUE_ONLY_PY = """\
++import work
++
++work.work(True)
++"""
++
++# A program that runs both branches.
++BOTH_PY = """\
++import work
++
++work.work(True)
++work.work(False)
++"""
++
++
++def core_params() -> list[Any]:
++    """The measurement cores usable here, each with and without branch coverage."""
++    cores = [("pytrace", "PyTracer", True)]
++    if CTRACER_FILE:
++        cores.append(("ctrace", "CTracer", True))
++    if env.PYBEHAVIOR.pep669:
++        cores.append(("sysmon", "SysMonitor", env.PYBEHAVIOR.branch_right_left))
++    params = []
++    for core, tracer_name, can_branch in cores:
++        for branch in [False, True] if can_branch else [False]:
++            params.append(
++                pytest.param(
++                    core, tracer_name, branch, id=f"{core}-{'branch' if branch else 'line'}"
++                )
++            )
++    return params
++
++
++# A tolerance for comparing times that have been through float arithmetic on
++# epoch-sized numbers.
++TOLERANCE = 1e-4
++
++
++class TimestampTestBase(CoverageTest):
++    """Helpers for timestamp tests."""
++
++    def setUp(self) -> None:
++        super().setUp()
++        self.make_file("clock.py", CLOCK_PY)
++        self.make_file("work.py", WORK_PY)
++        # The module most recently run by run_prog.
++        self.prog: ModuleType | None = None
++
++    def make_cov(self, branch: bool = False, timestamps: bool = True, **kwargs: Any) -> Coverage:
++        """Make a Coverage object, with timestamps enabled unless told otherwise."""
++        cov = coverage.Coverage(branch=branch, **kwargs)
++        cov.set_option("run:timestamps", timestamps)
++        return cov
++
++    def run_prog(
++        self, cov: Coverage, modname: str, modfile: str | None = None
++    ) -> tuple[float, float]:
++        """Run a module under `cov`, returning times from before and after the run."""
++        # Measured modules are imported fresh for each run.
++        for name in ["clock", "work", "other"]:
++            sys.modules.pop(name, None)
++        before = time.time()
++        self.prog = self.start_import_stop(cov, modname, modfile)
++        after = time.time()
++        return before, after
++
++    def prog_attr(self, name: str) -> Any:
++        """Get an attribute of the module most recently run by run_prog."""
++        assert self.prog is not None
++        return getattr(self.prog, name)
++
++    def run_to_data_file(
++        self,
++        text: str,
++        suffix: str,
++        branch: bool = False,
++        timestamps: bool = True,
++        **kwargs: Any,
++    ) -> tuple[CoverageData, float, float]:
++        """Run `text` as a program, saving its data to a suffixed data file.
++
++        Returns the data read back from the file, and the times before and
++        after the run.
++
++        """
++        modname = f"prog_{suffix}"
++        self.make_file(f"{modname}.py", text)
++        cov = self.make_cov(branch=branch, timestamps=timestamps, data_suffix=suffix, **kwargs)
++        before, after = self.run_prog(cov, modname)
++        cov.save()
++        data = CoverageData(f".coverage.{suffix}")
++        data.read()
++        return data, before, after
++
++    def work_file(self) -> str:
++        """The measured file name of work.py."""
++        return abs_file("work.py")
++
++
++def assert_times_between(times: dict[Any, float], before: float, after: float) -> None:
++    """Check that every time in `times` is in [before, after]."""
++    assert times
++    for key, when in times.items():
++        assert before <= when <= after, f"{key!r}: {when} not in [{before}, {after}]"
++
++
++def earliest(*timeses: dict[Any, float] | None) -> dict[Any, float]:
++    """Combine dicts of times, keeping the earliest time for each key."""
++    result: dict[Any, float] = {}
++    for times in timeses:
++        for key, when in (times or {}).items():
++            result[key] = min(when, result.get(key, when))
++    return result
++
++
++class TimestampConfigTest(TimestampTestBase):
++    """Tests of turning timestamps on and off."""
++
++    def test_off_by_default(self) -> None:
++        cov = coverage.Coverage()
++        assert cov.config.timestamps is False
++        assert cov.config.get_option("run:timestamps") is False
++
++    def test_config_file_setting(self) -> None:
++        self.make_file(
++            ".coveragerc",
++            """\
++            [run]
++            timestamps = True
++            """,
++        )
++        self.make_file("prog.py", BOTH_PY)
++        cov = coverage.Coverage()
++        assert cov.config.get_option("run:timestamps") is True
++        before, after = self.run_prog(cov, "prog")
++        times = cov.get_data().line_timestamps(self.work_file())
++        assert times is not None
++        assert_times_between(times, before, after)
++
++    def test_toml_config_setting(self) -> None:
++        self.make_file(
++            "pyproject.toml",
++            """\
++            [tool.coverage.run]
++            timestamps = true
++            branch = true
++            """,
++        )
++        self.make_file("prog.py", BOTH_PY)
++        cov = coverage.Coverage()
++        before, after = self.run_prog(cov, "prog")
++        times = cov.get_data().arc_timestamps(self.work_file())
++        assert times is not None
++        assert_times_between(times, before, after)
++
++    @pytest.mark.parametrize("branch", [False, True])
++    def test_disabled_records_no_timestamps(self, branch: bool) -> None:
++        self.make_file("prog.py", BOTH_PY)
++        cov = self.make_cov(branch=branch, timestamps=False)
++        self.run_prog(cov, "prog")
++        data = cov.get_data()
++        assert sorted(data.lines(self.work_file()) or []) == [1, 2, 3, 4, 6, 7, 9, 10]
++        assert data.line_timestamps(self.work_file()) == {}
++        assert data.arc_timestamps(self.work_file()) == {}
++
++    @pytest.mark.parametrize("branch", [False, True])
++    def test_timestamps_dont_change_measurement(self, branch: bool) -> None:
++        self.make_file("prog.py", PROG_PY)
++        cov_off = self.make_cov(branch=branch, timestamps=False, data_file=".cov_off")
++        self.run_prog(cov_off, "prog")
++        cov_on = self.make_cov(branch=branch, timestamps=True, data_file=".cov_on")
++        self.run_prog(cov_on, "prog")
++        data_off = cov_off.get_data()
++        data_on = cov_on.get_data()
++        assert data_on.has_arcs() == data_off.has_arcs() == branch
++        assert data_on.measured_files() == data_off.measured_files()
++        for filename in data_on.measured_files():
++            assert sorted(data_on.lines(filename) or []) == sorted(data_off.lines(filename) or [])
++            assert sorted(data_on.arcs(filename) or []) == sorted(data_off.arcs(filename) or [])
++
++    def test_unmeasured_file(self) -> None:
++        data = CoverageData(no_disk=True)
++        assert data.line_timestamps("nope.py") is None
++        assert data.arc_timestamps("nope.py") is None
++
++        self.make_file("prog.py", BOTH_PY)
++        cov = self.make_cov(branch=True)
++        self.run_prog(cov, "prog")
++        data = cov.get_data()
++        assert data.line_timestamps(abs_file("nope.py")) is None
++        assert data.arc_timestamps(abs_file("nope.py")) is None
++
++
++class LineTimestampTest(TimestampTestBase):
++    """Tests of timestamps for line coverage."""
++
++    def test_every_executed_line_has_a_time(self) -> None:
++        self.make_file("prog.py", TRUE_ONLY_PY)
++        cov = self.make_cov()
++        before, after = self.run_prog(cov, "prog")
++        data = cov.get_data()
++        times = data.line_timestamps(self.work_file())
++        assert times is not None
++        assert set(times) == set(data.lines(self.work_file()) or []) == {1, 2, 3, 4, 7, 9, 10}
++        assert_times_between(times, before, after)
++
++        prog_times = data.line_timestamps(abs_file("prog.py"))
++        assert prog_times is not None
++        assert set(prog_times) == {1, 3}
++        assert_times_between(prog_times, before, after)
++
++    def test_first_execution_is_kept(self) -> None:
++        self.make_file("prog.py", PROG_PY)
++        cov = self.make_cov()
++        before, after = self.run_prog(cov, "prog")
++        mark = self.prog_attr("mark")
++        times = cov.get_data().line_timestamps(self.work_file())
++        assert times is not None
++        # Executed before the mark, and again after it.
++        for lineno in [2, 3, 4, 7]:
++            assert before <= times[lineno] <= mark
++        # Only executed after the mark.
++        assert mark < times[6] <= after
++
++    def test_order_of_first_execution(self) -> None:
++        self.make_file(
++            "prog.py",
++            """\
++            import clock
++            import work
++
++            work.work(False)
++            mark1 = clock.tick()
++            work.work(True)
++            mark2 = clock.tick()
++            work.Thing().method()
++            """,
++        )
++        cov = self.make_cov()
++        before, after = self.run_prog(cov, "prog")
++        mark1 = self.prog_attr("mark1")
++        mark2 = self.prog_attr("mark2")
++        times = cov.get_data().line_timestamps(self.work_file())
++        assert times is not None
++        assert before <= times[6] <= mark1 < times[4] <= mark2 < times[11] <= after
++        prog_times = cov.get_data().line_timestamps(abs_file("prog.py"))
++        assert prog_times is not None
++        assert prog_times[4] <= mark1 < prog_times[6] <= mark2 < prog_times[8] <= after
++
++    def test_single_executed_line(self) -> None:
++        self.make_file("one.py", "x = 1\n")
++        cov = self.make_cov()
++        before, after = self.run_prog(cov, "one")
++        times = cov.get_data().line_timestamps(abs_file("one.py"))
++        assert times is not None
++        assert list(times) == [1]
++        assert_times_between(times, before, after)
++
++    def test_unexecuted_file(self) -> None:
++        self.make_file("never.py", "a = 1\nb = 2\n")
++        self.make_file("prog.py", TRUE_ONLY_PY)
++        cov = self.make_cov(source=["."])
++        self.run_prog(cov, "prog")
++        data = cov.get_data()
++        assert data.lines(abs_file("never.py")) == []
++        assert data.line_timestamps(abs_file("never.py")) == {}
++
++    def test_multiple_files(self) -> None:
++        self.make_file("other.py", "def hello():\n    return 'hi'\n")
++        self.make_file(
++            "prog.py",
++            """\
++            import clock
++            import work
++            work.work(True)
++            mark = clock.tick()
++            import other
++            other.hello()
++            """,
++        )
++        cov = self.make_cov()
++        before, after = self.run_prog(cov, "prog")
++        mark = self.prog_attr("mark")
++        data = cov.get_data()
++        work_times = data.line_timestamps(self.work_file())
++        other_times = data.line_timestamps(abs_file("other.py"))
++        assert work_times is not None and other_times is not None
++        assert set(work_times) == {1, 2, 3, 4, 7, 9, 10}
++        assert set(other_times) == {1, 2}
++        assert_times_between(work_times, before, mark)
++        assert_times_between(other_times, mark, after)
++
++
++class ArcTimestampTest(TimestampTestBase):
++    """Tests of timestamps for branch coverage."""
++
++    def test_every_executed_arc_has_a_time(self) -> None:
++        self.make_file("prog.py", TRUE_ONLY_PY)
++        cov = self.make_cov(branch=True)
++        before, after = self.run_prog(cov, "prog")
++        data = cov.get_data()
++        times = data.arc_timestamps(self.work_file())
++        assert times is not None
++        assert set(times) == set(data.arcs(self.work_file()) or [])
++        assert (3, 4) in times
++        assert (3, 6) not in times
++        assert_times_between(times, before, after)
++
++    def test_first_arc_execution_is_kept(self) -> None:
++        self.make_file("prog.py", PROG_PY)
++        cov = self.make_cov(branch=True)
++        before, after = self.run_prog(cov, "prog")
++        mark = self.prog_attr("mark")
++        data = cov.get_data()
++        times = data.arc_timestamps(self.work_file())
++        assert times is not None
++        assert set(times) == set(data.arcs(self.work_file()) or [])
++        assert_times_between(times, before, after)
++        for arc in [(3, 4), (7, -1)]:
++            assert before <= times[arc] <= mark, arc
++        assert mark < times[3, 6] <= after
++
++    def test_order_of_arcs(self) -> None:
++        self.make_file(
++            "prog.py",
++            """\
++            import clock
++            import work
++
++            work.work(False)
++            mark = clock.tick()
++            work.work(True)
++            """,
++        )
++        cov = self.make_cov(branch=True)
++        self.run_prog(cov, "prog")
++        mark = self.prog_attr("mark")
++        times = cov.get_data().arc_timestamps(self.work_file())
++        assert times is not None
++        assert times[3, 6] <= mark < times[3, 4]
++        assert times[7, -1] <= mark
++
++    def test_line_timestamps_from_branch_data(self) -> None:
++        self.make_file("prog.py", PROG_PY)
++        cov = self.make_cov(branch=True)
++        before, after = self.run_prog(cov, "prog")
++        mark = self.prog_attr("mark")
++        data = cov.get_data()
++        times = data.line_timestamps(self.work_file())
++        assert times is not None
++        assert set(times) == set(data.lines(self.work_file()) or [])
++        for lineno in [2, 3, 4, 7]:
++            assert before <= times[lineno] <= mark
++        assert mark < times[6] <= after
++
++    def test_single_executed_arc(self) -> None:
++        self.make_file("one.py", "x = 1\n")
++        cov = self.make_cov(branch=True)
++        before, after = self.run_prog(cov, "one")
++        data = cov.get_data()
++        times = data.arc_timestamps(abs_file("one.py"))
++        assert times is not None
++        assert set(times) == set(data.arcs(abs_file("one.py")) or [])
++        assert_times_between(times, before, after)
++        line_times = data.line_timestamps(abs_file("one.py"))
++        assert line_times is not None
++        assert list(line_times) == [1]
++
++
++class LifecycleTimestampTest(TimestampTestBase):
++    """Timestamps must survive saving data in the middle of a run."""
++
++    @pytest.mark.parametrize("branch", [False, True])
++    def test_save_during_run_keeps_first_time(self, branch: bool) -> None:
++        cov = self.make_cov(branch=branch)
++        before = time.time()
++        cov.start()
++        try:
++            work = import_local_file("work")
++            clock = import_local_file("clock")
++            work.work(True)
++            mark1 = clock.tick()
++            cov.save()
++            work.work(True)
++            mark2 = clock.tick()
++            cov.save()
++            work.work(True)
++            work.work(False)
++        finally:
++            cov.stop()
++        cov.save()
++        after = time.time()
++
++        data = CoverageData()
++        data.read()
++        times = data.line_timestamps(self.work_file())
++        assert times is not None
++        for lineno in [2, 3, 4, 7]:
++            assert before <= times[lineno] <= mark1
++        assert mark2 < times[6] <= after
++        if branch:
++            arc_times = data.arc_timestamps(self.work_file())
++            assert arc_times is not None
++            assert before <= arc_times[3, 4] <= mark1
++            assert mark2 < arc_times[3, 6] <= after
++
++    @pytest.mark.parametrize("branch", [False, True])
++    def test_context_switches(self, branch: bool) -> None:
++        cov = self.make_cov(branch=branch)
++        before = time.time()
++        cov.start()
++        try:
++            work = import_local_file("work")
++            clock = import_local_file("clock")
++            cov.switch_context("one")
++            work.work(True)
++            mark = clock.tick()
++            cov.switch_context("two")
++            work.work(True)
++            cov.switch_context("one")
++            work.work(True)
++            work.work(False)
++        finally:
++            cov.stop()
++        after = time.time()
++
++        data = cov.get_data()
++        wf = self.work_file()
++
++        data.set_query_contexts(["one"])
++        one_times = data.line_timestamps(wf)
++        assert one_times is not None
++        assert set(one_times) == set(data.lines(wf) or [])
++        for lineno in [2, 3, 4, 7]:
++            assert before <= one_times[lineno] <= mark
++        assert mark < one_times[6] <= after
++        if branch:
++            one_arcs = data.arc_timestamps(wf)
++            assert one_arcs is not None
++            assert one_arcs[3, 4] <= mark < one_arcs[3, 6]
++
++        data.set_query_contexts(["two"])
++        two_times = data.line_timestamps(wf)
++        assert two_times is not None
++        assert set(two_times) == set(data.lines(wf) or [])
++        assert 6 not in two_times
++        for when in two_times.values():
++            assert mark < when <= after
++
++        data.set_query_contexts(None)
++        all_times = data.line_timestamps(wf)
++        assert all_times is not None
++        assert set(all_times) == set(data.lines(wf) or [])
++        for lineno, when in one_times.items():
++            assert all_times[lineno] == when
++
++
++class PersistenceTimestampTest(TimestampTestBase):
++    """Timestamps are stored with the data."""
++
++    @pytest.mark.parametrize("branch", [False, True])
++    def test_reading_data_file(self, branch: bool) -> None:
++        self.make_file("other.py", "def hello():\n    return 'hi'\n")
++        self.make_file("prog.py", PROG_PY + "import other\nother.hello()\n")
++        cov = self.make_cov(branch=branch)
++        before, after = self.run_prog(cov, "prog")
++        cov.save()
++        live = cov.get_data()
++
++        data = CoverageData()
++        data.read()
++        assert data.has_arcs() == branch
++        assert data.measured_files() == live.measured_files()
++        for filename in data.measured_files():
++            times = data.line_timestamps(filename)
++            assert times is not None
++            assert times == live.line_timestamps(filename)
++            assert set(times) == set(data.lines(filename) or [])
++            assert_times_between(times, before, after)
++            if branch:
++                arc_times = data.arc_timestamps(filename)
++                assert arc_times is not None
++                assert arc_times == live.arc_timestamps(filename)
++                assert set(arc_times) == set(data.arcs(filename) or [])
++
++    @pytest.mark.parametrize("branch", [False, True])
++    def test_dumps_loads(self, branch: bool) -> None:
++        self.make_file("prog.py", PROG_PY)
++        cov = self.make_cov(branch=branch)
++        self.run_prog(cov, "prog")
++        data = cov.get_data()
++
++        data2 = CoverageData(no_disk=True)
++        data2.loads(data.dumps())
++        for filename in data.measured_files():
++            assert data2.line_timestamps(filename) == data.line_timestamps(filename)
++            assert data2.arc_timestamps(filename) == data.arc_timestamps(filename)
++        assert data2.line_timestamps(self.work_file())
++
++    @pytest.mark.parametrize("branch", [False, True])
++    def test_purge_files(self, branch: bool) -> None:
++        self.make_file("other.py", "def hello():\n    return 'hi'\n")
++        self.make_file("prog.py", BOTH_PY + "import other\nother.hello()\n")
++        cov = self.make_cov(branch=branch)
++        self.run_prog(cov, "prog")
++        cov.save()
++        data = CoverageData()
++        data.read()
++        other_lines = data.line_timestamps(abs_file("other.py"))
++        other_arcs = data.arc_timestamps(abs_file("other.py"))
++        assert other_lines
++
++        data.purge_files([self.work_file()])
++        assert data.lines(self.work_file()) == []
++        assert data.line_timestamps(self.work_file()) == {}
++        assert data.arc_timestamps(self.work_file()) == {}
++        assert data.line_timestamps(abs_file("other.py")) == other_lines
++        assert data.arc_timestamps(abs_file("other.py")) == other_arcs
++
++        # Purging is saved.
++        data2 = CoverageData()
++        data2.read()
++        assert data2.line_timestamps(self.work_file()) == {}
++        assert data2.line_timestamps(abs_file("other.py")) == other_lines
++
++
++class CombineTimestampTest(TimestampTestBase):
++    """Combining data keeps the earliest time for each line and arc."""
++
++    @pytest.mark.parametrize("branch", [False, True])
++    def test_update_keeps_earliest_in_either_order(self, branch: bool) -> None:
++        data_a, before_a, after_a = self.run_to_data_file(TRUE_ONLY_PY, "a", branch=branch)
++        data_b, before_b, _ = self.run_to_data_file(BOTH_PY, "b", branch=branch)
++        assert after_a <= before_b
++        wf = self.work_file()
++        lines_a = data_a.line_timestamps(wf)
++        lines_b = data_b.line_timestamps(wf)
++        assert lines_a and lines_b
++        assert 6 not in lines_a
++
++        combined_ab = CoverageData("ab")
++        combined_ab.update(data_a)
++        combined_ab.update(data_b)
++        combined_ba = CoverageData("ba")
++        combined_ba.update(data_b)
++        combined_ba.update(data_a)
++
++        for combined in [combined_ab, combined_ba]:
++            times = combined.line_timestamps(wf)
++            assert times == earliest(lines_a, lines_b)
++            assert times is not None
++            # Lines run in both came from the first run, line 6 only from the second.
++            assert times[4] == lines_a[4]
++            assert times[6] == lines_b[6]
++            assert_times_between({k: times[k] for k in lines_a}, before_a, after_a)
++            if branch:
++                arcs_a = data_a.arc_timestamps(wf)
++                arcs_b = data_b.arc_timestamps(wf)
++                arc_times = combined.arc_timestamps(wf)
++                assert arc_times == earliest(arcs_a, arcs_b)
++                assert arc_times is not None and arcs_a is not None and arcs_b is not None
++                assert arc_times[3, 4] == arcs_a[3, 4]
++                assert arc_times[3, 6] == arcs_b[3, 6]
++
++        # The combined data is saved and can be read back.
++        reread = CoverageData("ba")
++        reread.read()
++        assert reread.line_timestamps(wf) == earliest(lines_a, lines_b)
++
++    @pytest.mark.parametrize("branch", [False, True])
++    def test_combine_method_with_many_files(self, branch: bool) -> None:
++        self.make_file("other.py", "def hello():\n    return 'hi'\n")
++        runs = [
++            self.run_to_data_file(TRUE_ONLY_PY, "1", branch=branch),
++            self.run_to_data_file("import other\nother.hello()\n", "2", branch=branch),
++            self.run_to_data_file(BOTH_PY, "3", branch=branch),
++        ]
++        cov = self.make_cov(branch=branch)
++        cov.combine([".coverage.3", ".coverage.1", ".coverage.2"], keep=True)
++        cov.save()
++
++        data = CoverageData()
++        data.read()
++        for filename in [self.work_file(), abs_file("other.py")]:
++            assert data.line_timestamps(filename) == earliest(
++                *(run[0].line_timestamps(filename) for run in runs),
++            )
++            if branch:
++                assert data.arc_timestamps(filename) == earliest(
++                    *(run[0].arc_timestamps(filename) for run in runs),
++                )
++        other_times = data.line_timestamps(abs_file("other.py"))
++        assert other_times
++        assert_times_between(other_times, runs[1][1], runs[1][2])
++
++    def test_disjoint_files(self) -> None:
++        self.make_file("other.py", "def hello():\n    return 'hi'\n")
++        data_a, _, _ = self.run_to_data_file(TRUE_ONLY_PY, "a")
++        data_b, _, _ = self.run_to_data_file("import other\nother.hello()\n", "b")
++        combined = CoverageData("combined")
++        combined.update(data_b)
++        combined.update(data_a)
++        assert combined.line_timestamps(self.work_file()) == data_a.line_timestamps(
++            self.work_file()
++        )
++        assert combined.line_timestamps(abs_file("other.py")) == data_b.line_timestamps(
++            abs_file("other.py")
++        )
++
++    @pytest.mark.parametrize("branch", [False, True])
++    def test_combining_with_untimed_data(self, branch: bool) -> None:
++        data_a, _, _ = self.run_to_data_file(TRUE_ONLY_PY, "a", branch=branch)
++        data_b, _, _ = self.run_to_data_file(BOTH_PY, "b", branch=branch, timestamps=False)
++        wf = self.work_file()
++        assert data_b.line_timestamps(wf) == {}
++
++        for name, order in [("ab", (data_a, data_b)), ("ba", (data_b, data_a))]:
++            combined = CoverageData(name)
++            for data in order:
++                combined.update(data)
++            assert 6 in (combined.lines(wf) or [])
++            assert combined.line_timestamps(wf) == data_a.line_timestamps(wf)
++            assert combined.arc_timestamps(wf) == data_a.arc_timestamps(wf)
++
++    @pytest.mark.parametrize("branch", [False, True])
++    def test_remapped_paths(self, branch: bool) -> None:
++        self.make_file("run1/prog.py", PROG_PY)
++        self.make_file("run1/work.py", WORK_PY)
++        self.make_file("run2/prog.py", PROG_PY)
++        self.make_file("run2/work.py", WORK_PY)
++
++        # run2 runs first, so its times are the earliest.
++        cov2 = self.make_cov(branch=branch, data_suffix="2")
++        self.start_import_stop(cov2, "work", "run2/work.py")
++        self.start_import_stop(cov2, "prog", "run2/prog.py")
++        cov2.save()
++        cov1 = self.make_cov(branch=branch, data_suffix="1")
++        self.start_import_stop(cov1, "work", "run1/work.py")
++        self.start_import_stop(cov1, "prog", "run1/prog.py")
++        cov1.save()
++
++        data1 = CoverageData(".coverage.1")
++        data1.read()
++        data2 = CoverageData(".coverage.2")
++        data2.read()
++        work1, work2 = abs_file("run1/work.py"), abs_file("run2/work.py")
++        times1 = data1.line_timestamps(work1)
++        times2 = data2.line_timestamps(work2)
++        assert times1 and times2
++        assert max(times2.values()) <= min(times1.values())
++
++        self.make_file(
++            ".coveragerc",
++            """\
++            [paths]
++            source =
++                run1/
++                run2/
++            """,
++        )
++        cov = self.make_cov(branch=branch)
++        cov.combine([".coverage.1", ".coverage.2"], keep=True)
++        cov.save()
++        data = CoverageData()
++        data.read()
++        assert data.line_timestamps(work2) is None
++        assert data.line_timestamps(work1) == earliest(times1, times2) == times2
++        if branch:
++            arcs1 = data1.arc_timestamps(work1)
++            arcs2 = data2.arc_timestamps(work2)
++            assert data.arc_timestamps(work1) == earliest(arcs1, arcs2) == arcs2
++
++
++class ContextTimestampTest(TimestampTestBase):
++    """Timestamps are kept per context."""
++
++    @pytest.mark.parametrize("branch", [False, True])
++    def test_static_contexts(self, branch: bool) -> None:
++        data_a, _, _ = self.run_to_data_file(TRUE_ONLY_PY, "a", branch=branch, context="alpha")
++        data_b, _, _ = self.run_to_data_file(BOTH_PY, "b", branch=branch, context="beta")
++        wf = self.work_file()
++        lines_a = data_a.line_timestamps(wf)
++        lines_b = data_b.line_timestamps(wf)
++        assert lines_a and lines_b
++
++        combined = CoverageData("combined")
++        combined.update(data_b)
++        combined.update(data_a)
++        combined.write()
++
++        reread = CoverageData("combined")
++        reread.read()
++        for data in [combined, reread]:
++            data.set_query_contexts(["alpha"])
++            assert data.line_timestamps(wf) == lines_a
++            data.set_query_context("beta")
++            assert data.line_timestamps(wf) == lines_b
++            data.set_query_contexts(["alpha", "beta"])
++            assert data.line_timestamps(wf) == earliest(lines_a, lines_b)
++            data.set_query_contexts(None)
++            assert data.line_timestamps(wf) == earliest(lines_a, lines_b)
++            if branch:
++                arcs_a = data_a.arc_timestamps(wf)
++                arcs_b = data_b.arc_timestamps(wf)
++                data.set_query_context("alpha")
++                assert data.arc_timestamps(wf) == arcs_a
++                data.set_query_context("beta")
++                assert data.arc_timestamps(wf) == arcs_b
++                data.set_query_contexts(None)
++                assert data.arc_timestamps(wf) == earliest(arcs_a, arcs_b)
++
++    def test_purge_keeps_other_contexts_consistent(self) -> None:
++        self.make_file("other.py", "def hello():\n    return 'hi'\n")
++        data_a, _, _ = self.run_to_data_file(TRUE_ONLY_PY, "a", context="alpha")
++        data_b, _, _ = self.run_to_data_file("import other\nother.hello()\n", "b", context="beta")
++        combined = CoverageData("combined")
++        combined.update(data_a)
++        combined.update(data_b)
++        combined.purge_files([self.work_file()])
++        combined.set_query_context("beta")
++        assert combined.line_timestamps(abs_file("other.py")) == data_b.line_timestamps(
++            abs_file("other.py")
++        )
++        combined.set_query_contexts(None)
++        assert combined.line_timestamps(self.work_file()) == {}
++
++
++class JsonTimestampTest(TimestampTestBase):
++    """Timestamps in the JSON report."""
++
++    def json_report(self, cov: Coverage, **kwargs: Any) -> dict[str, Any]:
++        """Write a JSON report from `cov` and return the parsed JSON."""
++        cov.json_report(outfile="report.json", **kwargs)
++        with open("report.json", encoding="utf-8") as f:
++            report: dict[str, Any] = json.load(f)
++        return report
++
++    def assert_offsets(
++        self,
++        offsets: dict[TLineNo, float] | dict[TArc, float],
++        times: dict[TLineNo, float] | dict[TArc, float],
++    ) -> float:
++        """Check that `offsets` are `times` measured from one start time.
++
++        Returns the start time.
++
++        """
++        assert offsets
++        starts = [times[key] - offset for key, offset in offsets.items()]  # type: ignore[index]
++        start = starts[0]
++        for s in starts:
++            assert s == pytest.approx(start, abs=TOLERANCE)
++        for offset in offsets.values():
++            assert offset >= 0
++        return start
++
++    def file_line_offsets(self, file_data: dict[str, Any]) -> dict[TLineNo, float]:
++        """Get the line offsets from a JSON file entry, with int keys."""
++        return {int(lineno): offset for lineno, offset in file_data["line_timestamps"].items()}
++
++    def file_branch_offsets(self, file_data: dict[str, Any]) -> dict[TArc, float]:
++        """Get the branch offsets from a JSON file entry, as a dict."""
++        offsets = {}
++        for fromno, tono, offset in file_data["branch_timestamps"]:
++            offsets[fromno, tono] = offset
++        assert len(offsets) == len(file_data["branch_timestamps"])
++        return offsets
++
++    def all_entries(self, report: dict[str, Any]) -> list[dict[str, Any]]:
++        """Get every file entry and region entry in a JSON report."""
++        entries = []
++        for file_data in report["files"].values():
++            entries.append(file_data)
++            for kind in ["functions", "classes"]:
++                entries.extend(file_data[kind].values())
++        return entries
++
++    @pytest.mark.parametrize("branch", [False, True])
++    def test_no_timestamps_when_disabled(self, branch: bool) -> None:
++        self.make_file("prog.py", PROG_PY)
++        cov = self.make_cov(branch=branch, timestamps=False)
++        self.run_prog(cov, "prog")
++        report = self.json_report(cov)
++        entries = self.all_entries(report)
++        assert len(entries) > 3
++        for entry in entries:
++            assert "line_timestamps" not in entry
++            assert "branch_timestamps" not in entry
++        work_data = report["files"]["work.py"]
++        assert work_data["executed_lines"] == [1, 2, 3, 4, 6, 7, 9, 10]
++        if branch:
++            assert sorted(work_data["executed_branches"]) == [[3, 4], [3, 6]]
++
++    def test_line_offsets(self) -> None:
++        self.make_file("prog.py", PROG_PY)
++        cov = self.make_cov()
++        before, _ = self.run_prog(cov, "prog")
++        data = cov.get_data()
++        report = self.json_report(cov)
++
++        starts = []
++        for filename, file_data in report["files"].items():
++            offsets = self.file_line_offsets(file_data)
++            assert set(offsets) == set(file_data["executed_lines"])
++            times = data.line_timestamps(abs_file(filename))
++            assert times is not None
++            starts.append(self.assert_offsets(offsets, times))
++            assert "branch_timestamps" not in file_data
++        assert set(report["files"]) == {"clock.py", "prog.py", "work.py"}
++
++        # Every file is measured from the same start, before anything ran.
++        first_time = min(
++            min((data.line_timestamps(f) or {}).values()) for f in data.measured_files()
++        )
++        for start in starts:
++            assert start == pytest.approx(starts[0], abs=TOLERANCE)
++            assert before - TOLERANCE <= start <= first_time + TOLERANCE
++
++        mark = self.prog_attr("mark")
++        work_offsets = self.file_line_offsets(report["files"]["work.py"])
++        assert work_offsets[4] <= mark - starts[0] + TOLERANCE
++        assert work_offsets[6] > mark - starts[0] - TOLERANCE
++        assert work_offsets[4] < work_offsets[6]
++
++    def test_branch_offsets(self) -> None:
++        self.make_file("prog.py", PROG_PY)
++        cov = self.make_cov(branch=True)
++        before, _ = self.run_prog(cov, "prog")
++        data = cov.get_data()
++        report = self.json_report(cov)
++
++        work_data = report["files"]["work.py"]
++        wf = self.work_file()
++        line_times = data.line_timestamps(wf)
++        arc_times = data.arc_timestamps(wf)
++        assert line_times is not None and arc_times is not None
++
++        line_offsets = self.file_line_offsets(work_data)
++        assert set(line_offsets) == set(work_data["executed_lines"])
++        branch_offsets = self.file_branch_offsets(work_data)
++        assert set(branch_offsets) == {tuple(b) for b in work_data["executed_branches"]}
++        assert set(branch_offsets) == {(3, 4), (3, 6)}
++
++        start = self.assert_offsets(line_offsets, line_times)
++        assert self.assert_offsets(branch_offsets, arc_times) == pytest.approx(start, abs=TOLERANCE)
++        assert before - TOLERANCE <= start <= min(line_times.values()) + TOLERANCE
++        assert branch_offsets[3, 4] < branch_offsets[3, 6]
++
++    @pytest.mark.parametrize("branch", [False, True])
++    def test_region_offsets(self, branch: bool) -> None:
++        self.make_file(
++            "prog.py",
++            """\
++            import clock
++            import work
++
++            work.work(False)
++            mark = clock.tick()
++            work.Thing().method()
++            """,
++        )
++        cov = self.make_cov(branch=branch)
++        self.run_prog(cov, "prog")
++        report = self.json_report(cov)
++        work_data = report["files"]["work.py"]
++        file_offsets = self.file_line_offsets(work_data)
++        entries = [*work_data["functions"].values(), *work_data["classes"].values()]
++        assert set(work_data["functions"]) == {"work", "Thing.method", ""}
++        for region in entries:
++            region_offsets = self.file_line_offsets(region)
++            assert set(region_offsets) == set(region["executed_lines"])
++            for lineno, offset in region_offsets.items():
++                assert offset == file_offsets[lineno]
++            if branch:
++                region_branches = self.file_branch_offsets(region)
++                assert set(region_branches) == {tuple(b) for b in region["executed_branches"]}
++                file_branches = self.file_branch_offsets(work_data)
++                for arc, offset in region_branches.items():
++                    assert offset == file_branches[arc]
++
++        work_region = self.file_line_offsets(work_data["functions"]["work"])
++        assert set(work_region) == {2, 3, 4, 6, 7}
++        method_region = self.file_line_offsets(work_data["functions"]["Thing.method"])
++        assert set(method_region) == {11}
++        assert work_region[6] < work_region[4]
++        assert work_region[6] < method_region[11]
++        if branch:
++            work_branches = self.file_branch_offsets(work_data["functions"]["work"])
++            assert work_branches[3, 6] < work_branches[3, 4]
++
++    def test_combined_data_uses_earliest_start(self) -> None:
++        self.make_file("other.py", "def hello():\n    return 'hi'\n")
++        data_a, before_a, after_a = self.run_to_data_file(TRUE_ONLY_PY, "a", branch=True)
++        data_b, before_b, _ = self.run_to_data_file(
++            BOTH_PY + "import other\nother.hello()\n", "b", branch=True
++        )
++        assert after_a <= before_b
++
++        # Combine the later data first, so that its start time is seen first.
++        cov = self.make_cov(branch=True)
++        cov.combine([".coverage.b", ".coverage.a"], keep=True)
++        cov.save()
++        data = cov.get_data()
++        report = self.json_report(cov)
++
++        wf = self.work_file()
++        work_data = report["files"]["work.py"]
++        work_times = data.line_timestamps(wf)
++        assert work_times == earliest(data_a.line_timestamps(wf), data_b.line_timestamps(wf))
++        start = self.assert_offsets(self.file_line_offsets(work_data), work_times)
++        first_a = min((data_a.line_timestamps(wf) or {}).values())
++        assert before_a - TOLERANCE <= start <= first_a + TOLERANCE
++
++        # Lines first run in the second run have offsets measured from the
++        # first run's start.
++        work_offsets = self.file_line_offsets(work_data)
++        assert work_offsets[6] >= before_b - start - TOLERANCE
++
++        other_data = report["files"]["other.py"]
++        other_times = data.line_timestamps(abs_file("other.py"))
++        assert other_times
++        assert self.assert_offsets(self.file_line_offsets(other_data), other_times) == (
++            pytest.approx(start, abs=TOLERANCE)
++        )
++        branch_offsets = self.file_branch_offsets(work_data)
++        arc_times = data.arc_timestamps(wf)
++        assert arc_times is not None
++        assert self.assert_offsets(branch_offsets, arc_times) == pytest.approx(start, abs=TOLERANCE)
++
++    def test_combined_with_untimed_data(self) -> None:
++        self.make_file("other.py", "def hello():\n    return 'hi'\n")
++        data_a, before_a, _ = self.run_to_data_file(TRUE_ONLY_PY, "a")
++        self.run_to_data_file("import other\nother.hello()\n", "b", timestamps=False)
++        cov = self.make_cov()
++        cov.combine([".coverage.b", ".coverage.a"], keep=True)
++        cov.save()
++        report = self.json_report(cov)
++        assert report["files"]["other.py"]["executed_lines"] == [1, 2]
++        assert report["files"]["other.py"]["line_timestamps"] == {}
++        work_data = report["files"]["work.py"]
++        times = data_a.line_timestamps(self.work_file())
++        assert times is not None
++        start = self.assert_offsets(self.file_line_offsets(work_data), times)
++        assert before_a - TOLERANCE <= start <= min(times.values()) + TOLERANCE
++
++    def test_report_contexts(self) -> None:
++        self.run_to_data_file(TRUE_ONLY_PY, "a", context="alpha")
++        data_b, _, _ = self.run_to_data_file(BOTH_PY, "b", context="beta")
++        cov = self.make_cov()
++        cov.combine([".coverage.a", ".coverage.b"], keep=True)
++        cov.save()
++        data = cov.get_data()
++        wf = self.work_file()
++        all_times = data.line_timestamps(wf)
++        assert all_times is not None
++
++        report = self.json_report(cov, contexts=["beta"])
++        work_data = report["files"]["work.py"]
++        offsets = self.file_line_offsets(work_data)
++        beta_times = data_b.line_timestamps(wf)
++        assert beta_times is not None
++        assert set(offsets) == set(beta_times)
++        start = self.assert_offsets(offsets, beta_times)
++
++        full = self.json_report(cov)
++        full_offsets = self.file_line_offsets(full["files"]["work.py"])
++        assert self.assert_offsets(full_offsets, all_times) == pytest.approx(start, abs=TOLERANCE)
++        # The alpha run was first, so the full report shows earlier times.
++        assert full_offsets[4] < offsets[4]
++
++
++class CoreTimestampTest(TimestampTestBase):
++    """Timestamps are recorded whichever measurement core is used."""
++
++    def make_core_cov(self, core: str, branch: bool) -> Coverage:
++        """Make a Coverage object that will use `core`."""
++        cov = self.make_cov(branch=branch)
++        cov.set_option("run:core", core)
++        return cov
++
++    def check_core(self, cov: Coverage, tracer_name: str) -> None:
++        """Check that `cov` measured with the tracer we asked for."""
++        assert dict(cov.sys_info())["core"] == tracer_name
++
++    @pytest.mark.parametrize("core, tracer_name, branch", core_params())
++    def test_first_execution(self, core: str, tracer_name: str, branch: bool) -> None:
++        self.make_file("prog.py", PROG_PY)
++        cov = self.make_core_cov(core, branch)
++        before, after = self.run_prog(cov, "prog")
++        self.check_core(cov, tracer_name)
++        mark = self.prog_attr("mark")
++        data = cov.get_data()
++        wf = self.work_file()
++
++        times = data.line_timestamps(wf)
++        assert times is not None
++        assert set(times) == set(data.lines(wf) or [])
++        assert_times_between(times, before, after)
++        for lineno in [2, 3, 4, 7]:
++            assert times[lineno] <= mark
++        assert mark < times[6]
++
++        arc_times = data.arc_timestamps(wf)
++        assert arc_times is not None
++        if branch:
++            assert set(arc_times) == set(data.arcs(wf) or [])
++            assert_times_between(arc_times, before, after)
++            assert arc_times[3, 4] <= mark < arc_times[3, 6]
++        else:
++            assert arc_times == {}
++
++    @pytest.mark.parametrize("core, tracer_name, branch", core_params())
++    def test_save_during_run(self, core: str, tracer_name: str, branch: bool) -> None:
++        cov = self.make_core_cov(core, branch)
++        cov.start()
++        try:
++            work = import_local_file("work")
++            clock = import_local_file("clock")
++            work.work(True)
++            mark = clock.tick()
++            cov.save()
++            work.work(True)
++            work.work(False)
++        finally:
++            cov.stop()
++        cov.save()
++        self.check_core(cov, tracer_name)
++
++        data = CoverageData()
++        data.read()
++        times = data.line_timestamps(self.work_file())
++        assert times is not None
++        assert times[4] <= mark < times[6]
++        if branch:
++            arc_times = data.arc_timestamps(self.work_file())
++            assert arc_times is not None
++            assert arc_times[3, 4] <= mark < arc_times[3, 6]
++
++    @pytest.mark.parametrize("core, tracer_name, branch", core_params())
++    def test_json_report(self, core: str, tracer_name: str, branch: bool) -> None:
++        self.make_file("prog.py", PROG_PY)
++        cov = self.make_core_cov(core, branch)
++        before, _ = self.run_prog(cov, "prog")
++        self.check_core(cov, tracer_name)
++        cov.json_report(outfile="report.json")
++        with open("report.json", encoding="utf-8") as f:
++            work_data = json.load(f)["files"]["work.py"]
++
++        times = cov.get_data().line_timestamps(self.work_file())
++        assert times is not None
++        offsets = {int(k): v for k, v in work_data["line_timestamps"].items()}
++        assert set(offsets) == set(work_data["executed_lines"])
++        starts = {lineno: times[lineno] - offset for lineno, offset in offsets.items()}
++        start = starts[4]
++        for s in starts.values():
++            assert s == pytest.approx(start, abs=TOLERANCE)
++        assert before - TOLERANCE <= start <= min(times.values()) + TOLERANCE
++        if branch:
++            branch_offsets = {(f, t): o for f, t, o in work_data["branch_timestamps"]}
++            assert set(branch_offsets) == {tuple(b) for b in work_data["executed_branches"]}
++            assert branch_offsets[3, 4] < branch_offsets[3, 6]

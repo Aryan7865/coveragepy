@@ -1,0 +1,974 @@
+diff --git a/CHANGES.rst b/CHANGES.rst
+index c52424a08..dfa8f72e5 100644
+--- a/CHANGES.rst
++++ b/CHANGES.rst
+@@ -20,6 +20,18 @@ upgrading your version of coverage.py.
+     ..  Version 9.8.1 — 2027-07-27
+     ..  --------------------------
+ 
++Unreleased
++----------
++
++- Feature: the new :ref:`[run] timestamps <config_run_timestamps>` setting
++  records when each line and branch is first executed.  The times are available
++  from the new :meth:`.CoverageData.line_timestamps` and
++  :meth:`.CoverageData.arc_timestamps` methods, and are included in the JSON
++  report.  Closes `issue 2037`_.
++
++.. _issue 2037: https://github.com/coveragepy/coveragepy/issues/2037
++
++
+ .. start-releases
+ 
+ .. _changes_7-15-2:
+diff --git a/coverage/collector.py b/coverage/collector.py
+index e1263798b..bb45d05a0 100644
+--- a/coverage/collector.py
++++ b/coverage/collector.py
+@@ -9,6 +9,7 @@ import contextlib
+ import functools
+ import os
+ import sys
++import time
+ from collections.abc import Callable, Collection, Mapping
+ from types import FrameType
+ from typing import Any, TypeVar, cast
+@@ -69,6 +70,7 @@ class Collector:
+         branch: bool,
+         warn: TWarnFn,
+         concurrency: list[str],
++        timestamps: bool = False,
+     ) -> None:
+         """Create a collector.
+ 
+@@ -100,6 +102,9 @@ class Collector:
+         (the default).  "thread" can be combined with one of the other three.
+         Other values are ignored.
+ 
++        If `timestamps` is true, the time each line or arc is first executed
++        is recorded, along with the time collection started.
++
+         """
+         self.core = core
+         self.should_trace = should_trace
+@@ -108,6 +113,8 @@ class Collector:
+         self.file_mapper = file_mapper
+         self.branch = branch
+         self.warn = warn
++        self.timer = time.time if timestamps else None
++        self.start_time: float | None = None
+         assert isinstance(concurrency, list), f"Expected a list: {concurrency!r}"
+ 
+         self.pid = os.getpid()
+@@ -269,6 +276,8 @@ class Collector:
+             tracer.should_start_context = self.should_start_context
+         if hasattr(tracer, "switch_context"):
+             tracer.switch_context = self.switch_context
++        if hasattr(tracer, "timer"):
++            tracer.timer = self.timer
+         if hasattr(tracer, "disable_plugin"):
+             tracer.disable_plugin = self.disable_plugin
+ 
+@@ -315,6 +324,9 @@ class Collector:
+         if self._collectors:
+             self._collectors[-1].pause()
+ 
++        if self.timer is not None and self.start_time is None:
++            self.start_time = self.timer()
++
+         self.tracers = []
+ 
+         try:
+@@ -464,19 +476,15 @@ class Collector:
+                 # tracer.c:CTracer_record_pair for the C code that creates
+                 # these packed ints.
+                 arc_data = {}
+-                packed_data = cast(dict[str, set[int]], self.data)
++                packed_data = cast(dict[str, set[int] | dict[int, float]], self.data)
+ 
+                 for fname, packeds in packed_data.copy().items():
+-                    tuples = []
+-                    for packed in packeds.copy():
+-                        l1 = packed & 0xFFFFFFF
+-                        l2 = (packed & (0xFFFFFFF << 28)) >> 28
+-                        if packed & (1 << 56):
+-                            l1 *= -1
+-                        if packed & (1 << 57):
+-                            l2 *= -1
+-                        tuples.append((l1, l2))
+-                    arc_data[fname] = tuples
++                    if isinstance(packeds, dict):
++                        arc_data[fname] = {
++                            unpack_arc(packed): when for packed, when in packeds.copy().items()
++                        }
++                    else:
++                        arc_data[fname] = [unpack_arc(packed) for packed in packeds.copy()]
+             else:
+                 arc_data = {
+                     fname: arcs.copy()
+@@ -496,6 +504,19 @@ class Collector:
+             if v not in self.disabled_plugins
+         }
+         self.covdata.add_file_tracers(file_tracers)
++        if self.start_time is not None:
++            self.covdata.add_start_time(self.start_time)
+ 
+         self._clear_data()
+         return True
++
++
++def unpack_arc(packed: int) -> TArc:
++    """Unpack an arc packed into an integer by the C tracer."""
++    l1 = packed & 0xFFFFFFF
++    l2 = (packed & (0xFFFFFFF << 28)) >> 28
++    if packed & (1 << 56):
++        l1 *= -1
++    if packed & (1 << 57):
++        l2 *= -1
++    return l1, l2
+diff --git a/coverage/config.py b/coverage/config.py
+index 87473124a..4081c34d0 100644
+--- a/coverage/config.py
++++ b/coverage/config.py
+@@ -215,6 +215,7 @@ class CoverageConfig(TConfigurable, TPluginConfig):
+         self.source_pkgs: list[str] = []
+         self.source_dirs: list[str] = []
+         self.timid = False
++        self.timestamps = False
+         self._crash: str | None = None
+ 
+         # Defaults for [report]
+@@ -425,6 +426,7 @@ class CoverageConfig(TConfigurable, TPluginConfig):
+         ("source_pkgs", "run:source_pkgs", "list"),
+         ("source_dirs", "run:source_dirs", "list"),
+         ("timid", "run:timid", "boolean"),
++        ("timestamps", "run:timestamps", "boolean"),
+         ("_crash", "run:_crash"),
+         #
+         # [report]
+diff --git a/coverage/control.py b/coverage/control.py
+index 698e2428e..9c689eb87 100644
+--- a/coverage/control.py
++++ b/coverage/control.py
+@@ -604,6 +604,7 @@ class Coverage(TConfigurable):
+             branch=self.config.branch,
+             warn=self._warn,
+             concurrency=concurrency,
++            timestamps=self.config.timestamps,
+         )
+ 
+         suffix = self._data_suffix_specified
+diff --git a/coverage/ctracer/tracer.c b/coverage/ctracer/tracer.c
+index ce54a5ae8..1f19579a4 100644
+--- a/coverage/ctracer/tracer.c
++++ b/coverage/ctracer/tracer.c
+@@ -100,6 +100,7 @@ CTracer_dealloc(CTracer *self)
+     Py_XDECREF(self->unlock_data);
+     Py_XDECREF(self->context);
+     Py_XDECREF(self->disable_plugin);
++    Py_XDECREF(self->timer);
+ 
+     DataStack_dealloc(&self->stats, &self->data_stack);
+     if (self->data_stacks) {
+@@ -168,6 +169,43 @@ CTracer_showlog(CTracer * self, int lineno, PyObject * filename, const char * ms
+ static const char * what_sym[] = {"CALL", "EXC ", "LINE", "RET "};
+ #endif
+ 
++/* Record an item in self->pcur_entry->file_data. */
++static int
++CTracer_record_item(CTracer *self, PyObject * item)
++{
++    int ret = RET_ERROR;
++    PyObject * file_data = self->pcur_entry->file_data;
++    PyObject * now = NULL;
++    int seen;
++
++    if (PyDict_Check(file_data)) {
++        /* Recording timestamps: keep the time the item was first seen. */
++        seen = PyDict_Contains(file_data, item);
++        if (seen < 0) {
++            goto error;
++        }
++        if (!seen) {
++            now = PyObject_CallNoArgs(self->timer);
++            if (now == NULL) {
++                goto error;
++            }
++            if (PyDict_SetItem(file_data, item, now) < 0) {
++                goto error;
++            }
++        }
++    }
++    else if (PySet_Add(file_data, item) < 0) {
++        goto error;
++    }
++
++    ret = RET_OK;
++
++error:
++    Py_XDECREF(now);
++
++    return ret;
++}
++
+ /* Record a pair of integers in self->pcur_entry->file_data. */
+ static int
+ CTracer_record_pair(CTracer *self, int l1, int l2)
+@@ -197,7 +235,7 @@ CTracer_record_pair(CTracer *self, int l1, int l2)
+         goto error;
+     }
+ 
+-    if (PySet_Add(self->pcur_entry->file_data, packed_obj) < 0) {
++    if (CTracer_record_item(self, packed_obj) < 0) {
+         goto error;
+     }
+ 
+@@ -501,7 +539,12 @@ CTracer_handle_call(CTracer *self, PyFrameObject *frame)
+                 had_error = TRUE;
+                 goto unlock;
+             }
+-            file_data = PySet_New(NULL);
++            if (self->timer != NULL && self->timer != Py_None) {
++                file_data = PyDict_New();
++            }
++            else {
++                file_data = PySet_New(NULL);
++            }
+             if (file_data == NULL) {
+                 had_error = TRUE;
+                 goto unlock;
+@@ -701,7 +744,7 @@ CTracer_handle_line(CTracer *self, PyFrameObject *frame)
+                             goto error;
+                         }
+ 
+-                        ret2 = PySet_Add(self->pcur_entry->file_data, this_line);
++                        ret2 = CTracer_record_item(self, this_line);
+                         Py_DECREF(this_line);
+                         if (ret2 < 0) {
+                             goto error;
+@@ -1085,6 +1128,9 @@ CTracer_members[] = {
+     { "disable_plugin",     T_OBJECT, offsetof(CTracer, disable_plugin), 0,
+             PyDoc_STR("Function for disabling a plugin.") },
+ 
++    { "timer",              T_OBJECT, offsetof(CTracer, timer), 0,
++            PyDoc_STR("Function returning the time, if recording timestamps.") },
++
+     { NULL }
+ };
+ 
+diff --git a/coverage/ctracer/tracer.h b/coverage/ctracer/tracer.h
+index 4a6de28c1..a6ac0be15 100644
+--- a/coverage/ctracer/tracer.h
++++ b/coverage/ctracer/tracer.h
+@@ -30,6 +30,7 @@ typedef struct CTracer {
+     PyObject * lock_data;
+     PyObject * unlock_data;
+     PyObject * disable_plugin;
++    PyObject * timer;
+ 
+     /* Has the tracer been started? */
+     _Atomic BOOL started;
+@@ -48,7 +49,8 @@ typedef struct CTracer {
+ 
+         The file data is a set whose form depends on the tracing options.
+         If tracing arcs, the values are line number pairs.  If not tracing arcs,
+-        the values are line numbers.
++        the values are line numbers.  If there is a timer, the file data is a
++        dict mapping those values to the time they were first recorded.
+     */
+ 
+     DataStack data_stack;           /* Used if we aren't doing concurrency. */
+diff --git a/coverage/jsonreport.py b/coverage/jsonreport.py
+index 1c55b4d75..058846a2a 100644
+--- a/coverage/jsonreport.py
++++ b/coverage/jsonreport.py
+@@ -14,7 +14,7 @@ from typing import IO, TYPE_CHECKING, Any
+ from coverage import __version__
+ from coverage.report_core import get_analysis_to_report
+ from coverage.results import Analysis, AnalysisNarrower, Numbers
+-from coverage.types import TLineNo, TMorfs
++from coverage.types import TArc, TLineNo, TMorfs
+ 
+ if TYPE_CHECKING:
+     from coverage import Coverage
+@@ -38,6 +38,7 @@ class JsonReporter:
+ 
+     def __init__(self, coverage: Coverage) -> None:
+         self.coverage = coverage
++        self.start_time: float | None = None
+         self.config = self.coverage.config
+         self.total = Numbers(self.config.precision)
+         self.report_data: JsonObj = {}
+@@ -77,6 +78,7 @@ class JsonReporter:
+         outfile = outfile or sys.stdout
+         coverage_data = self.coverage.get_data()
+         coverage_data.set_query_contexts(self.config.report_contexts)
++        self.start_time = coverage_data.start_time()
+         self.report_data["meta"] = {
+             "format": FORMAT_VERSION,
+             "version": __version__,
+@@ -130,6 +132,8 @@ class JsonReporter:
+             reported_file["missing_branches"] = list(
+                 _convert_branch_arcs(analysis.missing_branch_arcs()),
+             )
++        line_times, arc_times = self.first_times(coverage_data, analysis, file_reporter)
++        reported_file.update(self.make_timestamp_data(analysis, line_times, arc_times))
+ 
+         num_lines = len(file_reporter.source().splitlines())
+         regions = file_reporter.code_regions()
+@@ -152,12 +156,16 @@ class JsonReporter:
+                     coverage_data,
+                     narrower.narrow(region.lines),
+                     region.start,
++                    line_times,
++                    arc_times,
+                 )
+ 
+             region_data[""] = self.make_region_data(
+                 coverage_data,
+                 narrower.narrow(outside_lines),
+                 min(outside_lines, default=1),
++                line_times,
++                arc_times,
+             )
+         return reported_file
+ 
+@@ -166,6 +174,8 @@ class JsonReporter:
+         coverage_data: CoverageData,
+         narrowed_analysis: Analysis,
+         start_line: int,
++        line_times: dict[TLineNo, float],
++        arc_times: dict[TArc, float],
+     ) -> JsonObj:
+         """Create the data object for one region of a file."""
+         narrowed_nums = narrowed_analysis.numbers
+@@ -188,8 +198,57 @@ class JsonReporter:
+             this_region["missing_branches"] = list(
+                 _convert_branch_arcs(narrowed_analysis.missing_branch_arcs()),
+             )
++        this_region.update(self.make_timestamp_data(narrowed_analysis, line_times, arc_times))
+         return this_region
+ 
++    def first_times(
++        self, coverage_data: CoverageData, analysis: Analysis, file_reporter: FileReporter
++    ) -> tuple[dict[TLineNo, float], dict[TArc, float]]:
++        """Get the first execution times of a file's lines and arcs.
++
++        The line numbers and arcs are translated the same way the analysis
++        translates them.
++
++        """
++        line_times: dict[TLineNo, float] = {}
++        arc_times: dict[TArc, float] = {}
++        if self.start_time is None:
++            return line_times, arc_times
++
++        for lineno, when in (coverage_data.line_timestamps(analysis.filename) or {}).items():
++            for translated in file_reporter.translate_lines([lineno]):
++                line_times[translated] = min(when, line_times.get(translated, when))
++        if coverage_data.has_arcs():
++            for arc, when in (coverage_data.arc_timestamps(analysis.filename) or {}).items():
++                for translated_arc in file_reporter.translate_arcs([arc]):
++                    arc_times[translated_arc] = min(when, arc_times.get(translated_arc, when))
++        return line_times, arc_times
++
++    def make_timestamp_data(
++        self,
++        analysis: Analysis,
++        line_times: dict[TLineNo, float],
++        arc_times: dict[TArc, float],
++    ) -> JsonObj:
++        """Create the timestamp data for a file or region, as offsets from the start time."""
++        if self.start_time is None:
++            return {}
++
++        timestamp_data: JsonObj = {
++            "line_timestamps": {
++                lineno: line_times[lineno] - self.start_time
++                for lineno in sorted(analysis.executed)
++                if lineno in line_times
++            },
++        }
++        if analysis.has_arcs:
++            timestamp_data["branch_timestamps"] = [
++                [fromno, tono, arc_times[fromno, tono] - self.start_time]
++                for fromno, tono in _convert_branch_arcs(analysis.executed_branch_arcs())
++                if (fromno, tono) in arc_times
++            ]
++        return timestamp_data
++
+ 
+ def _convert_branch_arcs(
+     branch_arcs: dict[TLineNo, list[TLineNo]],
+diff --git a/coverage/misc.py b/coverage/misc.py
+index cea4ff17d..74d88d552 100644
+--- a/coverage/misc.py
++++ b/coverage/misc.py
+@@ -18,7 +18,7 @@ import os.path
+ import re
+ import sys
+ import types
+-from collections.abc import Iterable, Iterator, Mapping, Sequence
++from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+ from types import ModuleType
+ from typing import Any, NoReturn, TypeVar
+ 
+@@ -204,6 +204,23 @@ class Hasher:
+         return self.hash.hexdigest()[:32]
+ 
+ 
++class FirstSeen(dict[Any, float]):
++    """A dict usable as a set, remembering when each item was first added.
++
++    `timer` is called to get the time an item is added for the first time.
++
++    """
++
++    def __init__(self, timer: Callable[[], float]) -> None:
++        super().__init__()
++        self.timer = timer
++
++    def add(self, item: Any) -> None:
++        """Add `item`, keeping the time it was first added."""
++        if item not in self:
++            self[item] = self.timer()
++
++
+ def _needs_to_implement(that: Any, func_name: str) -> NoReturn:
+     """Helper to raise NotImplementedError in interface stubs."""
+     if hasattr(that, "_coverage_plugin_name"):
+diff --git a/coverage/pytracer.py b/coverage/pytracer.py
+index c8aac0076..b5975dc2a 100644
+--- a/coverage/pytracer.py
++++ b/coverage/pytracer.py
+@@ -15,6 +15,7 @@ from types import FrameType, ModuleType
+ from typing import Any, cast
+ 
+ from coverage import env
++from coverage.misc import FirstSeen
+ from coverage.types import (
+     TArc,
+     TFileDisposition,
+@@ -85,6 +86,7 @@ class PyTracer(Tracer):
+         self.should_trace_cache: dict[str, TFileDisposition | None]
+         self.should_start_context: TShouldStartContextFn | None = None
+         self.switch_context: Callable[[str | None], None] | None = None
++        self.timer: Callable[[], float] | None = None
+         self.lock_data: Callable[[], None]
+         self.unlock_data: Callable[[], None]
+         self.warn: TWarnFn
+@@ -232,7 +234,9 @@ class PyTracer(Tracer):
+                     self.lock_data()
+                     try:
+                         if tracename not in self.data:
+-                            self.data[tracename] = set()
++                            self.data[tracename] = (
++                                set() if self.timer is None else FirstSeen(self.timer)
++                            )
+                     finally:
+                         self.unlock_data()
+                     self.cur_file_data = self.data[tracename]
+diff --git a/coverage/sqldata.py b/coverage/sqldata.py
+index 9701a63ba..49aeda9ef 100644
+--- a/coverage/sqldata.py
++++ b/coverage/sqldata.py
+@@ -38,7 +38,7 @@ os = isolate_module(os)
+ # If you change the schema: increment the SCHEMA_VERSION and update the
+ # docs in docs/dbschema.rst by running "make cogdoc".
+ 
+-SCHEMA_VERSION = 7
++SCHEMA_VERSION = 8
+ 
+ # Schema versions:
+ # 1: Released in 5.0a2
+@@ -66,6 +66,8 @@ SCHEMA = textwrap.dedent("""\
+         --  'version' text          -- The version of coverage.py that made the file.
+         --  'when' text             -- Datetime when the file was created.
+         --  'hash' text             -- Hash of the data.
++        --  'start_time' text       -- If recording timestamps, when measurement started,
++        --                             in seconds since the epoch.
+     );
+ 
+     CREATE TABLE file (
+@@ -93,12 +95,24 @@ SCHEMA = textwrap.dedent("""\
+         unique (file_id, context_id)
+     );
+ 
++    CREATE TABLE line_time (
++        -- If recording lines with timestamps, a row per context per line executed.
++        file_id integer,            -- foreign key to `file`.
++        context_id integer,         -- foreign key to `context`.
++        lineno integer,             -- line number executed.
++        first_time real,            -- when the line was first executed, in seconds since the epoch.
++        foreign key (file_id) references file (id),
++        foreign key (context_id) references context (id),
++        unique (file_id, context_id, lineno)
++    );
++
+     CREATE TABLE arc (
+         -- If recording branches, a row per context per from/to line transition executed.
+         file_id integer,            -- foreign key to `file`.
+         context_id integer,         -- foreign key to `context`.
+         fromno integer,             -- line number jumped from.
+         tono integer,               -- line number jumped to.
++        first_time real,            -- if recording timestamps, when the transition first happened.
+         foreign key (file_id) references file (id),
+         foreign key (context_id) references context (id),
+         unique (file_id, context_id, fromno, tono)
+@@ -113,6 +127,12 @@ SCHEMA = textwrap.dedent("""\
+     """)
+ 
+ 
++# When two first-execution times meet, keep the earliest one that exists.
++EARLIEST_FIRST_TIME = (
++    "coalesce(min(first_time, excluded.first_time), first_time, excluded.first_time)"
++)
++
++
+ def _locked(method: AnyCallable) -> AnyCallable:
+     """A decorator for methods that should hold self._lock."""
+ 
+@@ -537,6 +557,9 @@ class CoverageData:
+ 
+             { filename: { line1, line2, ... }, ...}
+ 
++        The iterables can instead be dictionaries mapping each line number to
++        the time it was first executed, in seconds since the epoch.
++
+         """
+         if self._debug.should("dataop"):
+             nlines = sum(len(lines) for lines in line_data.values())
+@@ -568,6 +591,19 @@ class CoverageData:
+                     """,
+                     (file_id, self._current_context_id, line_bits),
+                 )
++                if isinstance(linenos, Mapping):
++                    con.executemany_void(
++                        """
++                        INSERT INTO line_time
++                        (file_id, context_id, lineno, first_time) VALUES (?, ?, ?, ?)
++                        ON CONFLICT (file_id, context_id, lineno)
++                        DO UPDATE SET first_time = min(first_time, excluded.first_time)
++                        """,
++                        [
++                            (file_id, self._current_context_id, lineno, when)
++                            for lineno, when in linenos.items()
++                        ],
++                    )
+ 
+     @_locked
+     def add_arcs(self, arc_data: Mapping[str, Collection[TArc]]) -> None:
+@@ -578,6 +614,9 @@ class CoverageData:
+ 
+             { filename: { (l1,l2), (l1,l2), ... }, ...}
+ 
++        The iterables can instead be dictionaries mapping each pair to the
++        time it was first executed, in seconds since the epoch.
++
+         """
+         if self._debug.should("dataop"):
+             narcs = sum(len(arcs) for arcs in arc_data.values())
+@@ -597,14 +636,51 @@ class CoverageData:
+                 if not arcs:
+                     continue
+                 file_id = self._file_id(filename, add=True)
+-                data = [(file_id, self._current_context_id, fromno, tono) for fromno, tono in arcs]
+-                con.executemany_void(
+-                    """
+-                    INSERT OR IGNORE INTO arc
+-                    (file_id, context_id, fromno, tono) VALUES (?, ?, ?, ?)
+-                    """,
+-                    data,
+-                )
++                if isinstance(arcs, Mapping):
++                    con.executemany_void(
++                        f"""
++                        INSERT INTO arc
++                        (file_id, context_id, fromno, tono, first_time) VALUES (?, ?, ?, ?, ?)
++                        ON CONFLICT (file_id, context_id, fromno, tono)
++                        DO UPDATE SET first_time = {EARLIEST_FIRST_TIME}
++                        """,
++                        [
++                            (file_id, self._current_context_id, fromno, tono, when)
++                            for (fromno, tono), when in arcs.items()
++                        ],
++                    )
++                else:
++                    data = [
++                        (file_id, self._current_context_id, fromno, tono) for fromno, tono in arcs
++                    ]
++                    con.executemany_void(
++                        """
++                        INSERT OR IGNORE INTO arc
++                        (file_id, context_id, fromno, tono) VALUES (?, ?, ?, ?)
++                        """,
++                        data,
++                    )
++
++    def add_start_time(self, start_time: float) -> None:
++        """Record when measurement started, in seconds since the epoch.
++
++        If a start time is already recorded, the earlier one is kept.
++
++        .. versionadded:: 7.16
++
++        """
++        self._start_using()
++        with self._connect() as con:
++            self._keep_earliest_start_time(con, start_time)
++
++    def _keep_earliest_start_time(self, con: SqliteDb, start_time: float) -> None:
++        """Record `start_time` in the database if it's earlier than what's there."""
++        row = con.execute_one("SELECT value FROM meta WHERE key = 'start_time'")
++        if row is None or start_time < float(row[0]):
++            con.execute_void(
++                "INSERT OR REPLACE INTO meta (key, value) VALUES ('start_time', ?)",
++                (repr(start_time),),
++            )
+ 
+     def _choose_lines_or_arcs(self, lines: bool = False, arcs: bool = False) -> None:
+         """Force the data file to choose between lines and arcs."""
+@@ -695,9 +771,12 @@ class CoverageData:
+         self._start_using()
+         with self._connect() as con:
+             if self._has_lines:
+-                sql = "DELETE FROM line_bits WHERE file_id=?"
++                sqls = [
++                    "DELETE FROM line_bits WHERE file_id=?",
++                    "DELETE FROM line_time WHERE file_id=?",
++                ]
+             elif self._has_arcs:
+-                sql = "DELETE FROM arc WHERE file_id=?"
++                sqls = ["DELETE FROM arc WHERE file_id=?"]
+             else:
+                 raise DataError("Can't purge files in an empty CoverageData")
+ 
+@@ -705,7 +784,8 @@ class CoverageData:
+                 file_id = self._file_id(filename, add=False)
+                 if file_id is None:
+                     continue
+-                con.execute_void(sql, (file_id,))
++                for sql in sqls:
++                    con.execute_void(sql, (file_id,))
+ 
+     def update(
+         self,
+@@ -801,6 +881,11 @@ class CoverageData:
+             with con.execute("SELECT id, path FROM file") as cur:
+                 self._file_map.update({path: id for id, path in cur})
+ 
++            # Keep the earliest start time
++            row = con.execute_one("SELECT value FROM other_db.meta WHERE key = 'start_time'")
++            if row is not None:
++                self._keep_earliest_start_time(con, float(row[0]))
++
+             with con.execute("""
+                 SELECT
+                     EXISTS(SELECT 1 FROM other_db.arc),
+@@ -822,17 +907,21 @@ class CoverageData:
+                     INNER JOIN main.context AS main_context ON other_context.context = main_context.context
+                 """)
+ 
+-                con.execute_void("""
+-                    INSERT OR IGNORE INTO main.arc (file_id, context_id, fromno, tono)
++                con.execute_void(f"""
++                    INSERT INTO main.arc (file_id, context_id, fromno, tono, first_time)
+                     SELECT
+                         main_file.id,
+                         context_mapping.main_id,
+                         other_arc.fromno,
+-                        other_arc.tono
++                        other_arc.tono,
++                        other_arc.first_time
+                     FROM other_db.arc AS other_arc
+                     INNER JOIN other_file_mapped ON other_arc.file_id = other_file_mapped.other_file_id
+                     INNER JOIN context_mapping ON other_arc.context_id = context_mapping.other_id
+                     INNER JOIN main.file AS main_file ON other_file_mapped.mapped_path = main_file.path
++                    WHERE true
++                    ON CONFLICT (file_id, context_id, fromno, tono)
++                    DO UPDATE SET first_time = {EARLIEST_FIRST_TIME}
+                 """)
+ 
+             # Handle line_bits if present in other_db
+@@ -867,6 +956,23 @@ class CoverageData:
+                     INNER JOIN main.context AS main_context ON aggregated.context = main_context.context
+                 """)
+ 
++                con.execute_void("""
++                    INSERT INTO main.line_time (file_id, context_id, lineno, first_time)
++                    SELECT
++                        main_file.id,
++                        main_context.id,
++                        other_line_time.lineno,
++                        other_line_time.first_time
++                    FROM other_db.line_time AS other_line_time
++                    INNER JOIN other_file_mapped ON other_line_time.file_id = other_file_mapped.other_file_id
++                    INNER JOIN other_db.context AS other_context ON other_line_time.context_id = other_context.id
++                    INNER JOIN main.file AS main_file ON other_file_mapped.mapped_path = main_file.path
++                    INNER JOIN main.context AS main_context ON other_context.context = main_context.context
++                    WHERE true
++                    ON CONFLICT (file_id, context_id, lineno)
++                    DO UPDATE SET first_time = min(first_time, excluded.first_time)
++                """)
++
+             # Insert tracers from other_db (avoiding conflicts we already checked)
+             con.execute_void("""
+                 INSERT OR IGNORE INTO main.tracer (file_id, tracer)
+@@ -1086,6 +1192,87 @@ class CoverageData:
+                 with con.execute(query, data) as cur:
+                     return list(cur)
+ 
++    def line_timestamps(self, filename: str) -> dict[TLineNo, float] | None:
++        """Get the times lines in a file were first executed.
++
++        If the file was not measured, returns None.  Otherwise returns a dict
++        mapping line numbers to the time each line was first executed, in
++        seconds since the epoch.  Lines executed without recording timestamps
++        aren't included.
++
++        .. versionadded:: 7.16
++
++        """
++        self._start_using()
++        if self.has_arcs():
++            arc_times = self.arc_timestamps(filename)
++            if arc_times is not None:
++                line_times: dict[TLineNo, float] = {}
++                for arc, when in arc_times.items():
++                    for lineno in arc:
++                        if lineno > 0:
++                            line_times[lineno] = min(when, line_times.get(lineno, when))
++                return line_times
++
++        with self._connect() as con:
++            file_id = self._file_id(filename)
++            if file_id is None:
++                return None
++            else:
++                query = "SELECT lineno, min(first_time) FROM line_time WHERE file_id = ?"
++                data = [file_id]
++                if self._query_context_ids is not None:
++                    ids_array = ", ".join("?" * len(self._query_context_ids))
++                    query += " AND context_id IN (" + ids_array + ")"
++                    data += self._query_context_ids
++                query += " GROUP BY lineno"
++                with con.execute(query, data) as cur:
++                    return dict(cur)
++
++    def arc_timestamps(self, filename: str) -> dict[TArc, float] | None:
++        """Get the times arcs in a file were first executed.
++
++        If the file was not measured, returns None.  Otherwise returns a dict
++        mapping arcs (as returned by :meth:`arcs`) to the time each arc was
++        first executed, in seconds since the epoch.  Arcs executed without
++        recording timestamps aren't included.
++
++        .. versionadded:: 7.16
++
++        """
++        self._start_using()
++        with self._connect() as con:
++            file_id = self._file_id(filename)
++            if file_id is None:
++                return None
++            else:
++                query = """
++                    SELECT fromno, tono, min(first_time) FROM arc
++                    WHERE file_id = ? AND first_time IS NOT NULL
++                """
++                data = [file_id]
++                if self._query_context_ids is not None:
++                    ids_array = ", ".join("?" * len(self._query_context_ids))
++                    query += " AND context_id IN (" + ids_array + ")"
++                    data += self._query_context_ids
++                query += " GROUP BY fromno, tono"
++                with con.execute(query, data) as cur:
++                    return {(fromno, tono): when for fromno, tono, when in cur}
++
++    def start_time(self) -> float | None:
++        """Get the time measurement started, in seconds since the epoch.
++
++        Returns None if no timestamps were recorded.  Combined data has the
++        earliest start time of the data combined into it.
++
++        .. versionadded:: 7.16
++
++        """
++        self._start_using()
++        with self._connect() as con:
++            row = con.execute_one("SELECT value FROM meta WHERE key = 'start_time'")
++        return float(row[0]) if row is not None else None
++
+     def contexts_by_lineno(self, filename: str) -> dict[TLineNo, list[str]]:
+         """Get the contexts for each line in a file.
+ 
+diff --git a/coverage/sysmon.py b/coverage/sysmon.py
+index ed769e5c0..5844efbf1 100644
+--- a/coverage/sysmon.py
++++ b/coverage/sysmon.py
+@@ -23,7 +23,7 @@ from coverage import env
+ from coverage.bytecode import BranchArcResolver, bytes_to_lines
+ from coverage.debug import short_filename, short_stack
+ from coverage.exceptions import NoSource
+-from coverage.misc import isolate_module
++from coverage.misc import FirstSeen, isolate_module
+ from coverage.parser import multiline_map_from_text
+ from coverage.python import get_python_source
+ from coverage.types import (
+@@ -197,6 +197,7 @@ class SysMonitor(Tracer):
+         # Change tests/testenv.py:DYN_CONTEXTS when this is updated.
+         self.should_start_context: TShouldStartContextFn | None = None
+         self.switch_context: Callable[[str | None], None] | None = None
++        self.timer: Callable[[], float] | None = None
+         self.lock_data: Callable[[], None]
+         self.unlock_data: Callable[[], None]
+         # TODO: warn is unused.
+@@ -352,7 +353,9 @@ class SysMonitor(Tracer):
+                 self.lock_data()
+                 try:
+                     if tracename not in self.data:
+-                        self.data[tracename] = set()
++                        self.data[tracename] = (
++                            set() if self.timer is None else FirstSeen(self.timer)
++                        )
+                 finally:
+                     self.unlock_data()
+                 file_data = self.data[tracename]
+diff --git a/coverage/tracer.pyi b/coverage/tracer.pyi
+index c45bf39f1..06c5f8e17 100644
+--- a/coverage/tracer.pyi
++++ b/coverage/tracer.pyi
+@@ -33,6 +33,7 @@ class CTracer(Tracer):
+     switch_context: Any
+     lock_data: Any
+     unlock_data: Any
++    timer: Any
+     trace_arcs: Any
+     warn: Any
+     def __init__(self) -> None: ...
+diff --git a/coverage/types.py b/coverage/types.py
+index 5663d3e56..76015af3d 100644
+--- a/coverage/types.py
++++ b/coverage/types.py
+@@ -72,8 +72,17 @@ class TFileDisposition(Protocol):
+ #   of line numbers).
+ # - If measuring arcs in the C tracer, the values are sets of packed arcs (two
+ #   line numbers combined into one integer).
+-
+-TTraceFileData = set[TLineNo] | set[TArc] | set[int]
++# - If recording timestamps, the sets are replaced by dicts mapping the same
++#   values to the time each was first recorded.
++
++TTraceFileData = (
++    set[TLineNo]
++    | set[TArc]
++    | set[int]
++    | dict[TLineNo, float]
++    | dict[TArc, float]
++    | dict[int, float]
++)
+ 
+ TTraceData = dict[str, TTraceFileData]
+ 
+diff --git a/doc/commands/cmd_json.rst b/doc/commands/cmd_json.rst
+index f5d47dc8e..db67e2468 100644
+--- a/doc/commands/cmd_json.rst
++++ b/doc/commands/cmd_json.rst
+@@ -63,3 +63,10 @@ can be nicely formatted by specifying the ``--pretty-print`` switch.
+ Other common reporting options are described above in :ref:`cmd_reporting`.
+ These options can also be set in your .coveragerc file. See
+ :ref:`Configuration: [json] <config_json>`.
++
++If the data was collected with :ref:`[run] timestamps <config_run_timestamps>`,
++each file and each function and class region in the report also has a
++``line_timestamps`` object mapping executed line numbers to when each line was
++first executed.  With branch coverage there is also a ``branch_timestamps``
++list of ``[from, to, time]`` entries for the executed branches.  The times are
++offsets in seconds from the earliest start of measurement in the data.
+diff --git a/doc/config.rst b/doc/config.rst
+index a9c0c1d3d..c2326512e 100644
+--- a/doc/config.rst
++++ b/doc/config.rst
+@@ -598,6 +598,23 @@ PyTracer trace function core instead of CTracer, and is only needed in very
+ unusual circumstances.
+ 
+ 
++.. _config_run_timestamps:
++
++[run] timestamps
++................
++
++(boolean, default False) Record when each line and branch is first executed.
++Times are stored in the data file as seconds since the epoch, along with the
++time measurement started.  They are kept separately for each
++:ref:`context <contexts>`, and combining data keeps the earliest time for each
++line or branch.  The times are available from
++:meth:`.CoverageData.line_timestamps` and :meth:`.CoverageData.arc_timestamps`,
++and appear in the :ref:`JSON report <cmd_json>` as offsets in seconds from the
++earliest start of measurement.
++
++.. versionadded:: 7.16
++
++
+ .. _config_paths:
+ 
+ [paths]
+diff --git a/doc/dbschema.rst b/doc/dbschema.rst
+index dc2f0ce48..3b69e1060 100644
+--- a/doc/dbschema.rst
++++ b/doc/dbschema.rst
+@@ -32,9 +32,9 @@ to:
+ .. ]]]
+ .. code::
+ 
+-    SCHEMA_VERSION = 7
++    SCHEMA_VERSION = 8
+ 
+-.. [[[end]]] (sum: ladTQN8zI3)
++.. [[[end]]] (sum: Z+nc95uiOU)
+ 
+ You can use SQLite tools such as the :mod:`sqlite3 <python:sqlite3>` module in
+ the Python standard library to access the data.  Some data is stored in a
+@@ -72,6 +72,8 @@ This is the database schema:
+         --  'version' text          -- The version of coverage.py that made the file.
+         --  'when' text             -- Datetime when the file was created.
+         --  'hash' text             -- Hash of the data.
++        --  'start_time' text       -- If recording timestamps, when measurement started,
++        --                             in seconds since the epoch.
+     );
+ 
+     CREATE TABLE file (
+@@ -99,12 +101,24 @@ This is the database schema:
+         unique (file_id, context_id)
+     );
+ 
++    CREATE TABLE line_time (
++        -- If recording lines with timestamps, a row per context per line executed.
++        file_id integer,            -- foreign key to `file`.
++        context_id integer,         -- foreign key to `context`.
++        lineno integer,             -- line number executed.
++        first_time real,            -- when the line was first executed, in seconds since the epoch.
++        foreign key (file_id) references file (id),
++        foreign key (context_id) references context (id),
++        unique (file_id, context_id, lineno)
++    );
++
+     CREATE TABLE arc (
+         -- If recording branches, a row per context per from/to line transition executed.
+         file_id integer,            -- foreign key to `file`.
+         context_id integer,         -- foreign key to `context`.
+         fromno integer,             -- line number jumped from.
+         tono integer,               -- line number jumped to.
++        first_time real,            -- if recording timestamps, when the transition first happened.
+         foreign key (file_id) references file (id),
+         foreign key (context_id) references context (id),
+         unique (file_id, context_id, fromno, tono)
+@@ -117,7 +131,7 @@ This is the database schema:
+         foreign key (file_id) references file (id)
+     );
+ 
+-.. [[[end]]] (sum: 7dE2ATKbel)
++.. [[[end]]] (sum: n5qedxdzhK)
+ 
+ 
+ .. _numbits:
