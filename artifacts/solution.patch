@@ -1,0 +1,173 @@
+diff --git a/coverage/collector.py b/coverage/collector.py
+index e1263798b..02be1a8db 100644
+--- a/coverage/collector.py
++++ b/coverage/collector.py
+@@ -69,6 +69,7 @@ class Collector:
+         branch: bool,
+         warn: TWarnFn,
+         concurrency: list[str],
++        exclude_origin: Callable[[str], bool] | None = None,
+     ) -> None:
+         """Create a collector.
+ 
+@@ -100,6 +101,10 @@ class Collector:
+         (the default).  "thread" can be combined with one of the other three.
+         Other values are ignored.
+ 
++        `exclude_origin` is a function taking a file name, and returning True
++        if code run while a frame from that file is on the call stack should
++        not be recorded.
++
+         """
+         self.core = core
+         self.should_trace = should_trace
+@@ -108,6 +113,7 @@ class Collector:
+         self.file_mapper = file_mapper
+         self.branch = branch
+         self.warn = warn
++        self.exclude_origin = exclude_origin
+         assert isinstance(concurrency, list), f"Expected a list: {concurrency!r}"
+ 
+         self.pid = os.getpid()
+@@ -269,6 +275,8 @@ class Collector:
+             tracer.should_start_context = self.should_start_context
+         if hasattr(tracer, "switch_context"):
+             tracer.switch_context = self.switch_context
++        if hasattr(tracer, "exclude_origin"):
++            tracer.exclude_origin = self.exclude_origin
+         if hasattr(tracer, "disable_plugin"):
+             tracer.disable_plugin = self.disable_plugin
+ 
+diff --git a/coverage/config.py b/coverage/config.py
+index 87473124a..30775cb28 100644
+--- a/coverage/config.py
++++ b/coverage/config.py
+@@ -208,6 +208,7 @@ class CoverageConfig(TConfigurable, TPluginConfig):
+         self.patch: list[str] = []
+         self.plugins: list[str] = []
+         self.relative_files = False
++        self.run_exclude_origin: list[str] = []
+         self.run_include: list[str] = []
+         self.run_omit: list[str] = []
+         self.sigterm = False
+@@ -271,6 +272,7 @@ class CoverageConfig(TConfigurable, TPluginConfig):
+         "report_include",
+         "run_omit",
+         "run_include",
++        "run_exclude_origin",
+         "patch",
+     }
+ 
+@@ -418,6 +420,7 @@ class CoverageConfig(TConfigurable, TPluginConfig):
+         ("patch", "run:patch", "list"),
+         ("plugins", "run:plugins", "list"),
+         ("relative_files", "run:relative_files", "boolean"),
++        ("run_exclude_origin", "run:exclude_origin", "list"),
+         ("run_include", "run:include", "list"),
+         ("run_omit", "run:omit", "list"),
+         ("sigterm", "run:sigterm", "boolean"),
+diff --git a/coverage/control.py b/coverage/control.py
+index 698e2428e..d439894f3 100644
+--- a/coverage/control.py
++++ b/coverage/control.py
+@@ -36,7 +36,15 @@ from coverage.debug import (
+ )
+ from coverage.disposition import disposition_debug_msg
+ from coverage.exceptions import ConfigError, CoverageException, CoverageWarning, PluginError
+-from coverage.files import PathAliases, abs_file, relative_filename, set_relative_directory
++from coverage.files import (
++    GlobMatcher,
++    PathAliases,
++    abs_file,
++    canonical_filename,
++    prep_patterns,
++    relative_filename,
++    set_relative_directory,
++)
+ from coverage.html import HtmlReporter
+ from coverage.inorout import InOrOut
+ from coverage.jsonreport import JsonReporter
+@@ -595,6 +603,21 @@ class Coverage(TConfigurable):
+             config=self.config,
+             dynamic_contexts=(should_start_context is not None),
+         )
++
++        exclude_origin: Callable[[str], bool] | None = None
++        if self.config.run_exclude_origin:
++            origin_match = GlobMatcher(
++                prep_patterns(self.config.run_exclude_origin), "exclude_origin"
++            )
++            origin_cache: dict[str, bool] = {}
++
++            def exclude_origin(filename: str) -> bool:
++                excluded = origin_cache.get(filename)
++                if excluded is None:
++                    excluded = origin_match.match(canonical_filename(filename))
++                    origin_cache[filename] = excluded
++                return excluded
++
+         self._collector = Collector(
+             core=self._core,
+             should_trace=self._should_trace,
+@@ -604,6 +627,7 @@ class Coverage(TConfigurable):
+             branch=self.config.branch,
+             warn=self._warn,
+             concurrency=concurrency,
++            exclude_origin=exclude_origin,
+         )
+ 
+         suffix = self._data_suffix_specified
+diff --git a/coverage/core.py b/coverage/core.py
+index d6e65a84e..515e58d3e 100644
+--- a/coverage/core.py
++++ b/coverage/core.py
+@@ -83,6 +83,9 @@ class Core:
+         if config.timid:
+             core_name = "pytrace"
+             _debug("core.py: Using pytrace because timid=True")
++        elif config.run_exclude_origin:
++            core_name = "pytrace"
++            _debug("core.py: Using pytrace because exclude_origin is set")
+         elif core_name is None:
+             # This could still leave core_name as None.
+             core_name = config.core
+diff --git a/coverage/pytracer.py b/coverage/pytracer.py
+index c8aac0076..a3438756b 100644
+--- a/coverage/pytracer.py
++++ b/coverage/pytracer.py
+@@ -85,6 +85,7 @@ class PyTracer(Tracer):
+         self.should_trace_cache: dict[str, TFileDisposition | None]
+         self.should_start_context: TShouldStartContextFn | None = None
+         self.switch_context: Callable[[str | None], None] | None = None
++        self.exclude_origin: Callable[[str], bool] | None = None
+         self.lock_data: Callable[[], None]
+         self.unlock_data: Callable[[], None]
+         self.warn: TWarnFn
+@@ -216,9 +217,9 @@ class PyTracer(Tracer):
+             # don't have to re-check whether to trace the corresponding
+             # function (which is a little bit expensive since it involves
+             # dictionary lookups). This optimization is only correct if we
+-            # didn't start a context.
++            # didn't start a context, and aren't excluding by origin.
+             filename = frame.f_code.co_filename
+-            if filename != self.cur_file_name or started_context:
++            if filename != self.cur_file_name or started_context or self.exclude_origin:
+                 self.cur_file_name = filename
+                 disp = self.should_trace_cache.get(filename)
+                 if disp is None:
+@@ -241,6 +242,15 @@ class PyTracer(Tracer):
+             elif not self.cur_file_data:
+                 frame.f_trace_lines = False
+ 
++            # Don't record anything while an excluded origin is on the stack.
++            if self.cur_file_data is not None and self.exclude_origin:
++                origin: FrameType | None = frame
++                while origin is not None:
++                    if self.exclude_origin(origin.f_code.co_filename):  # pylint: disable=not-callable
++                        self.cur_file_data = None
++                        break
++                    origin = origin.f_back
++
+             # The call event is really a "start frame" event, and happens for
+             # function calls and re-entering generators.  The f_lasti field is
+             # -1 for calls, and a real offset for generators.  Use <0 as the

@@ -1,0 +1,307 @@
+diff --git a/test.sh b/test.sh
+new file mode 100755
+index 000000000..8186713f9
+--- /dev/null
++++ b/test.sh
+@@ -0,0 +1,57 @@
++#!/usr/bin/env bash
++# Run the test suites: "base" is existing behavior, "new" is exclude_origin.
++set -uo pipefail
++
++OUTPUT_PATH="results.xml"
++MODE=""
++while [[ $# -gt 0 ]]; do
++    case "$1" in
++        --output_path)
++            OUTPUT_PATH="$2"
++            shift 2
++            ;;
++        --output_path=*)
++            OUTPUT_PATH="${1#*=}"
++            shift
++            ;;
++        base|new)
++            MODE="$1"
++            shift
++            ;;
++        *)
++            echo "Unknown argument: $1" >&2
++            echo "Usage: $0 --output_path <file.xml> base|new" >&2
++            exit 2
++            ;;
++    esac
++done
++
++if [[ -z "$MODE" ]]; then
++    echo "Usage: $0 --output_path <file.xml> base|new" >&2
++    exit 2
++fi
++
++cd "$(dirname "${BASH_SOURCE[0]}")"
++
++case "$MODE" in
++    base)
++        TESTS=(
++            tests/test_config.py
++            tests/test_collector.py
++            tests/test_core.py
++            tests/test_arcs.py
++        )
++        ;;
++    new)
++        TESTS=(
++            tests/test_exclude_origin.py
++        )
++        ;;
++esac
++
++python -m pytest \
++    -p no:cacheprovider \
++    -o addopts="" \
++    -q -n auto --dist loadgroup -p no:legacypath --no-flaky-report -rfEX \
++    --junitxml="$OUTPUT_PATH" \
++    "${TESTS[@]}"
+diff --git a/tests/test_exclude_origin.py b/tests/test_exclude_origin.py
+new file mode 100644
+index 000000000..15cd716a7
+--- /dev/null
++++ b/tests/test_exclude_origin.py
+@@ -0,0 +1,238 @@
++# Licensed under the Apache License: http://www.apache.org/licenses/LICENSE-2.0
++# For details: https://github.com/coveragepy/coveragepy/blob/main/NOTICE.txt
++
++"""Tests for excluding measurement by execution origin."""
++
++from __future__ import annotations
++
++import coverage
++from coverage.files import abs_file
++
++from tests.coveragetest import CoverageTest
++
++
++MOD_PY = """\
++def f(x):
++    if x:
++        a = 1
++    else:
++        a = 2
++    return a
++
++def boom():
++    raise ValueError("boom")
++
++def gen():
++    yield 1
++    yield 2
++"""
++
++CALLER_PY = """\
++import mod
++
++def run(x):
++    return mod.f(x)
++
++def run_boom():
++    try:
++        mod.boom()
++    except ValueError as exc:
++        return str(exc)
++    return None
++"""
++
++
++class ExcludeOriginTest(CoverageTest):
++    """Tests of the [run] exclude_origin setting."""
++
++    def setUp(self) -> None:
++        super().setUp()
++        self.make_file("mod.py", MOD_PY)
++        for name in ["origin_a", "origin_b", "other"]:
++            self.make_file(f"{name}.py", CALLER_PY)
++
++    def make_cov(self, exclude_origin: list[str] | None, branch: bool = False) -> coverage.Coverage:
++        """Make a Coverage object measuring the current directory."""
++        cov = coverage.Coverage(source=["."], branch=branch)
++        if exclude_origin is not None:
++            cov.set_option("run:exclude_origin", exclude_origin)
++        return cov
++
++    def measure(
++        self,
++        main: str,
++        exclude_origin: list[str] | None = None,
++        branch: bool = False,
++    ) -> coverage.CoverageData:
++        """Run `main` as main.py under coverage, and return the data."""
++        self.make_file("main.py", main)
++        cov = self.make_cov(exclude_origin, branch)
++        self.start_import_stop(cov, "main")
++        return cov.get_data()
++
++    def mod_lines(self, data: coverage.CoverageData) -> set[int]:
++        """The lines recorded for mod.py."""
++        return set(data.lines(abs_file("mod.py")) or ())
++
++    def mod_arcs(self, data: coverage.CoverageData) -> set[tuple[int, int]]:
++        """The arcs recorded for mod.py."""
++        return set(data.arcs(abs_file("mod.py")) or ())
++
++    def test_config_setting(self) -> None:
++        self.make_file(
++            ".coveragerc",
++            """\
++            [run]
++            exclude_origin =
++                */tests/*
++                conftest.py
++            """,
++        )
++        assert coverage.Coverage(config_file=False).config.run_exclude_origin == []
++        cov = coverage.Coverage()
++        assert cov.config.run_exclude_origin == ["*/tests/*", "conftest.py"]
++        assert cov.config.get_option("run:exclude_origin") == [
++            "*/tests/*",
++            "conftest.py",
++        ]
++
++    def test_matching_caller_is_suppressed(self) -> None:
++        data = self.measure(
++            """\
++            import mod, origin_a
++            result = origin_a.run(True)
++            """,
++            exclude_origin=["*/origin_a.py"],
++        )
++        assert self.mod_lines(data) == {1, 8, 11}
++        assert data.lines(abs_file("origin_a.py")) in (None, [])
++
++    def test_excluded_code_still_runs(self) -> None:
++        self.make_file("main.py", "import mod, origin_a\nr = origin_a.run(True)\n")
++        main = self.start_import_stop(self.make_cov(["*/origin_a.py"]), "main")
++        assert main.r == 1
++        cov2 = self.make_cov(["*/origin_a.py"])
++        self.make_file("main2.py", "import mod, origin_a\nr = origin_a.run_boom()\n")
++        main2 = self.start_import_stop(cov2, "main2")
++        assert main2.r == "boom"
++        assert 9 not in self.mod_lines(cov2.get_data())
++
++    def test_coverage_resumes_after_leaving_origin(self) -> None:
++        data = self.measure(
++            """\
++            import mod, origin_a
++            origin_a.run(True)
++            mod.f(True)
++            """,
++            exclude_origin=["*/origin_a.py"],
++        )
++        assert self.mod_lines(data) == {1, 2, 3, 6, 8, 11}
++
++    def test_generator_resumes_outside_origin(self) -> None:
++        self.make_file(
++            "origin_a.py",
++            """\
++            import mod
++            def start():
++                g = mod.gen()
++                next(g)
++                return g
++            """,
++        )
++        data = self.measure(
++            """\
++            import mod, origin_a
++            g = origin_a.start()
++            next(g)
++            """,
++            exclude_origin=["*/origin_a.py"],
++        )
++        assert self.mod_lines(data) == {1, 8, 11, 13}
++
++    def test_non_matching_caller_records(self) -> None:
++        data = self.measure(
++            """\
++            import mod, other, origin_a
++            other.run(True)
++            origin_a.run(False)
++            """,
++            exclude_origin=["*/origin_a.py"],
++        )
++        assert self.mod_lines(data) == {1, 2, 3, 6, 8, 11}
++        assert 4 in set(data.lines(abs_file("other.py")) or ())
++
++    def test_branch_coverage_is_suppressed(self) -> None:
++        data = self.measure(
++            """\
++            import mod, other, origin_a
++            other.run(True)
++            origin_a.run(False)
++            """,
++            branch=True,
++            exclude_origin=["*/origin_a.py"],
++        )
++        arcs = self.mod_arcs(data)
++        assert (2, 3) in arcs
++        assert (2, 5) not in arcs
++        assert (5, 6) not in arcs
++        assert (-1, 2) in arcs
++
++    def test_branch_coverage_resumes(self) -> None:
++        data = self.measure(
++            """\
++            import mod, origin_a
++            origin_a.run(True)
++            mod.f(False)
++            """,
++            branch=True,
++            exclude_origin=["*/origin_a.py"],
++        )
++        arcs = self.mod_arcs(data)
++        assert (2, 5) in arcs
++        assert (2, 3) not in arcs
++        assert (3, 6) not in arcs
++
++    def test_multiple_patterns(self) -> None:
++        data = self.measure(
++            """\
++            import mod, origin_a, origin_b, other
++            origin_a.run(True)
++            origin_b.run(False)
++            other.run_boom()
++            """,
++            exclude_origin=["*/origin_a.py", "origin_b.py"],
++        )
++        assert self.mod_lines(data) == {1, 8, 9, 11}
++
++    def test_outer_frame_is_an_origin(self) -> None:
++        # The matching frame can be anywhere up the stack, not just the
++        # immediate caller of the measured code.
++        self.make_file(
++            "other.py",
++            """\
++            import origin_a
++            def run(x):
++                return origin_a.run(x)
++            """,
++        )
++        data = self.measure(
++            """\
++            import mod, other
++            other.run(True)
++            """,
++            exclude_origin=["*/other.py"],
++        )
++        assert self.mod_lines(data) == {1, 8, 11}
++        assert set(data.lines(abs_file("main.py")) or ()) == {1, 2}
++
++    def test_no_setting_is_unchanged(self) -> None:
++        data = self.measure(
++            """\
++            import mod, origin_a
++            origin_a.run(True)
++            origin_a.run(False)
++            """,
++            branch=True,
++        )
++        assert self.mod_lines(data) == {1, 2, 3, 5, 6, 8, 11}
++        assert {(2, 3), (2, 5), (3, 6), (5, 6)} <= self.mod_arcs(data)
