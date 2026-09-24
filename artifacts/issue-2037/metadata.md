@@ -9,7 +9,7 @@
 Files:
 
 - `description.md`: the task description
-- `test.patch`: `test.sh` and `tests/test_timestamps.py`
+- `test.patch`: `test.sh` and `tests/test_timestamps_93a2c2.py`
 - `solution.patch`: the implementation, with docs
 - `Dockerfile`
 - `test.sh`: the same file that `test.patch` adds, for reference

@@ -1,6 +1,6 @@
 diff --git a/test.sh b/test.sh
 new file mode 100755
-index 000000000..9e80e6925
+index 000000000..81d413fa4
 --- /dev/null
 +++ b/test.sh
 @@ -0,0 +1,109 @@
@@ -100,7 +100,7 @@ index 000000000..9e80e6925
 +        ;;
 +    new)
 +        TESTS=(
-+            tests/test_timestamps.py
++            tests/test_timestamps_93a2c2.py
 +        )
 +        DESELECT=()
 +        ;;
@@ -113,11 +113,11 @@ index 000000000..9e80e6925
 +    --junitxml="$OUTPUT_PATH" \
 +    "${DESELECT[@]}" \
 +    "${TESTS[@]}"
-diff --git a/tests/test_timestamps.py b/tests/test_timestamps.py
+diff --git a/tests/test_timestamps_93a2c2.py b/tests/test_timestamps_93a2c2.py
 new file mode 100644
 index 000000000..148de8414
 --- /dev/null
-+++ b/tests/test_timestamps.py
++++ b/tests/test_timestamps_93a2c2.py
 @@ -0,0 +1,1126 @@
 +# Licensed under the Apache License: http://www.apache.org/licenses/LICENSE-2.0
 +# For details: https://github.com/coveragepy/coveragepy/blob/main/NOTICE.txt

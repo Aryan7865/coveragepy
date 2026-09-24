@@ -94,7 +94,7 @@ case "$MODE" in
         ;;
     new)
         TESTS=(
-            tests/test_timestamps.py
+            tests/test_timestamps_93a2c2.py
         )
         DESELECT=()
         ;;
