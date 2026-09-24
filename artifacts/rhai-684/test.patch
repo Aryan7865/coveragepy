@@ -1,0 +1,218 @@
+diff --git a/.config/nextest.toml b/.config/nextest.toml
+new file mode 100644
+index 0000000..022490b
+--- /dev/null
++++ b/.config/nextest.toml
+@@ -0,0 +1,5 @@
++[profile.junit]
++fail-fast = false
++
++[profile.junit.junit]
++path = "junit.xml"
+diff --git a/test.sh b/test.sh
+new file mode 100755
+index 0000000..350a1fc
+--- /dev/null
++++ b/test.sh
+@@ -0,0 +1,61 @@
++#!/usr/bin/env bash
++# Run the test suites and write a JUnit XML report.
++#
++# Usage:
++#   ./test.sh [--output_path <junit.xml>] <base|new>
++#
++#   base  the existing tests of the rhai crate.
++#   new   the tests for destructuring `let` and `const` statements.
++set -uo pipefail
++
++OUTPUT_PATH="results.xml"
++MODE=""
++while [[ $# -gt 0 ]]; do
++    case "$1" in
++        --output_path)
++            OUTPUT_PATH="$2"
++            shift 2
++            ;;
++        --output_path=*)
++            OUTPUT_PATH="${1#*=}"
++            shift
++            ;;
++        base|new)
++            MODE="$1"
++            shift
++            ;;
++        *)
++            echo "Unknown argument: $1" >&2
++            echo "Usage: $0 [--output_path <junit.xml>] <base|new>" >&2
++            exit 2
++            ;;
++    esac
++done
++
++if [[ -z "$MODE" ]]; then
++    echo "Usage: $0 [--output_path <junit.xml>] <base|new>" >&2
++    exit 2
++fi
++
++cd "$(dirname "${BASH_SOURCE[0]}")"
++
++case "$MODE" in
++    base)
++        FILTER="not binary(destructuring_b8f523)"
++        ;;
++    new)
++        FILTER="binary(destructuring_b8f523)"
++        ;;
++esac
++
++rm -f target/nextest/junit/junit.xml
++
++cargo nextest run -p rhai --profile junit --no-fail-fast -E "$FILTER"
++STATUS=$?
++
++if [[ -f target/nextest/junit/junit.xml ]]; then
++    mkdir -p "$(dirname "$OUTPUT_PATH")"
++    cp target/nextest/junit/junit.xml "$OUTPUT_PATH"
++fi
++
++exit $STATUS
+diff --git a/tests/destructuring_b8f523.rs b/tests/destructuring_b8f523.rs
+new file mode 100644
+index 0000000..a770d1b
+--- /dev/null
++++ b/tests/destructuring_b8f523.rs
+@@ -0,0 +1,134 @@
++use rhai::{Engine, EvalAltResult, OptimizationLevel, Scope, INT};
++
++#[test]
++fn test_destructuring_array() {
++    let engine = Engine::new();
++
++    assert_eq!(engine.eval::<INT>("let [a, b, c] = [1, 2, 3]; a * 100 + b * 10 + c").unwrap(), 123);
++    assert_eq!(engine.eval::<String>(r#"let pair = ["hello", "world"]; let [x, y] = pair; `${y} ${x}`"#).unwrap(), "world hello");
++    assert_eq!(engine.eval::<INT>("let [a, b] = [40, 2]; a += b; a").unwrap(), 42);
++}
++
++#[test]
++fn test_destructuring_map() {
++    let engine = Engine::new();
++
++    assert_eq!(engine.eval::<INT>("let [x] = [0]; let #{ x, y } = #{ y: 2, x: 40, z: 99 }; x + y").unwrap(), 42);
++    assert_eq!(engine.eval::<INT>("let m = #{ a: 1, b: 2 }; let #{ b } = m; b").unwrap(), 2);
++    assert_eq!(engine.eval::<INT>("let m = #{ a: 1, b: 2 }; let #{ a } = m; m.a + m.b + a").unwrap(), 4);
++}
++
++#[test]
++fn test_destructuring_const() {
++    let engine = Engine::new();
++
++    assert_eq!(engine.eval::<INT>("const [a, b] = [20, 22]; a + b").unwrap(), 42);
++    assert_eq!(engine.eval::<INT>("const #{ a, b } = #{ a: 20, b: 22 }; a + b").unwrap(), 42);
++    assert!(engine.run("const [a, b] = [1, 2]; a = 5;").is_err());
++    assert!(engine.run("const #{ a } = #{ a: 1 }; a = 5;").is_err());
++    assert!(engine.run("let [a, b] = [1, 2]; a = 5; b = 6;").is_ok());
++}
++
++#[test]
++fn test_destructuring_value_evaluated_once() {
++    let engine = Engine::new();
++
++    assert_eq!(engine.eval::<INT>("let count = 0; let [a, b, c] = { count += 1; [1, 2, 3] }; count").unwrap(), 1);
++    assert_eq!(engine.eval::<INT>("let count = 0; let #{ a, b } = { count += 1; #{ a: 1, b: 2 } }; count * 10 + a + b").unwrap(), 13);
++}
++
++#[test]
++fn test_destructuring_wrong_shape() {
++    let engine = Engine::new();
++
++    assert!(engine.run("let [a, b] = [1, 2]; let #{ a } = #{ a: 1 };").is_ok());
++
++    assert!(engine.run("let [a, b] = [1, 2, 3];").is_err());
++    assert!(engine.run("let [a, b, c] = [1, 2];").is_err());
++    assert!(engine.run("let [a, b] = 42;").is_err());
++    assert!(engine.run("let [a, b] = #{ a: 1, b: 2 };").is_err());
++    assert!(engine.run(r#"let #{ a } = "hello";"#).is_err());
++    assert!(engine.run("let #{ a } = [1];").is_err());
++}
++
++#[test]
++fn test_destructuring_map_missing_property() {
++    let mut engine = Engine::new();
++
++    assert!(engine.eval::<bool>("let #{ a, b } = #{ a: 1 }; b == ()").unwrap());
++
++    engine.set_fail_on_invalid_map_property(true);
++
++    assert!(matches!(*engine.run("let #{ a, b } = #{ a: 1 };").unwrap_err(), EvalAltResult::ErrorPropertyNotFound(..)));
++    assert_eq!(engine.eval::<INT>("let #{ a } = #{ a: 1 }; a").unwrap(), 1);
++}
++
++#[test]
++fn test_destructuring_strict_variables() {
++    let mut engine = Engine::new();
++    engine.set_strict_variables(true);
++
++    assert_eq!(engine.eval::<INT>("let [a, b] = [1, 2]; let #{ c } = #{ c: 3 }; a + b + c").unwrap(), 6);
++    assert!(engine.compile("let [a, b] = [1, 2]; a + c").is_err());
++}
++
++#[test]
++fn test_destructuring_shadowing() {
++    let mut engine = Engine::new();
++
++    assert_eq!(engine.eval::<INT>("let a = 1; let [a, b] = [a + 10, a + 20]; a * 100 + b").unwrap(), 1121);
++    assert_eq!(engine.eval::<INT>("let a = 1; { let [a] = [2]; } a").unwrap(), 1);
++
++    engine.set_allow_shadowing(false);
++
++    assert!(engine.run("let a = 1; let [a, b] = [2, 3];").is_err());
++    assert!(engine.run("let a = 1; let #{ a } = #{ a: 2 };").is_err());
++    assert_eq!(engine.eval::<INT>("let [a, b] = [2, 3]; a + b").unwrap(), 5);
++}
++
++#[test]
++fn test_destructuring_optimizer() {
++    for level in [OptimizationLevel::None, OptimizationLevel::Simple, OptimizationLevel::Full] {
++        let mut engine = Engine::new();
++        engine.set_optimization_level(level);
++
++        assert_eq!(engine.eval::<INT>("const a = 1; let [a] = [2]; a").unwrap(), 2, "{level:?}");
++        assert_eq!(engine.eval::<INT>("const a = 1; const #{ a } = #{ a: 3 }; a").unwrap(), 3, "{level:?}");
++        assert_eq!(engine.eval::<INT>("const [x, y] = [3, 4]; x * y").unwrap(), 12, "{level:?}");
++    }
++}
++
++#[test]
++fn test_destructuring_closures_and_functions() {
++    let engine = Engine::new();
++
++    assert_eq!(engine.eval::<INT>("let [a, b] = [1, 2]; let f = || a + b; a = 10; f.call()").unwrap(), 12);
++    assert_eq!(engine.eval::<INT>("fn sum(v) { let [x, y, z] = v; x + y + z } sum([1, 2, 3]) + sum([4, 5, 6])").unwrap(), 21);
++    assert_eq!(engine.eval::<INT>("let total = 0; for p in [[1, 2], [3, 4]] { let [a, b] = p; total += a * b; } total").unwrap(), 14);
++}
++
++#[test]
++fn test_destructuring_scope() {
++    let engine = Engine::new();
++    let mut scope = Scope::new();
++
++    engine.run_with_scope(&mut scope, "let [a, b] = [1, 2]; const #{ c } = #{ c: 3 };").unwrap();
++
++    assert_eq!(scope.get_value::<INT>("a").unwrap(), 1);
++    assert_eq!(scope.get_value::<INT>("b").unwrap(), 2);
++    assert_eq!(scope.get_value::<INT>("c").unwrap(), 3);
++    assert!(scope.is_constant("c").unwrap());
++    assert!(!scope.is_constant("a").unwrap());
++}
++
++#[test]
++#[allow(deprecated)]
++fn test_destructuring_def_var_callback() {
++    let mut engine = Engine::new();
++
++    engine.on_def_var(|_, info, _| Ok(info.name() != "forbidden"));
++
++    assert_eq!(engine.eval::<INT>("let [a, b] = [1, 2]; a + b").unwrap(), 3);
++    assert!(engine.run("let [a, forbidden] = [1, 2];").is_err());
++    assert!(engine.run("let #{ forbidden } = #{ forbidden: 1 };").is_err());
++}

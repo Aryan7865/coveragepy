@@ -1,0 +1,532 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index f333c95..d5901e9 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -21,6 +21,7 @@ Bug fixes
+ New features
+ ------------
+ 
++* Arrays and object maps can now be destructured in `let` and `const` statements, e.g. `let [a, b] = array;` and `let #{ x, y } = map;` ([`#684`](https://github.com/rhaiscript/rhai/issues/684)).
+ * New `no_ast` feature that excludes the `AST`, its interpreter, the tokenizer, parser and optimizer for a minimized build.  Under this feature flag, the Rhai Grain VM is the only venue to evaluate a script.
+ 
+ Enhancements
+diff --git a/src/ast/mod.rs b/src/ast/mod.rs
+index 6c02018..f52da89 100644
+--- a/src/ast/mod.rs
++++ b/src/ast/mod.rs
+@@ -13,5 +13,5 @@ pub use expr::{BinaryExpr, Expr, FnCallExpr};
+ pub use flags::ASTFlags;
+ pub use stmt::{
+     CaseBlocksList, FlowControl, OpAssignment, Stmt, StmtBlock, StmtBlockContainer,
+-    SwitchCasesCollection,
++    SwitchCasesCollection, VarPattern,
+ };
+diff --git a/src/ast/stmt.rs b/src/ast/stmt.rs
+index 0b7866e..7fba801 100644
+--- a/src/ast/stmt.rs
++++ b/src/ast/stmt.rs
+@@ -440,6 +440,28 @@ pub struct FlowControl {
+     pub branch: StmtBlock,
+ }
+ 
++/// _(internals)_ A destructuring pattern in a `let` or `const` statement.
++/// Exported under the `internals` feature only.
++#[derive(Debug, Clone, Hash)]
++#[non_exhaustive]
++pub enum VarPattern {
++    /// `[` id `,` ... `]` - bind array elements by position.
++    Array(FnArgsVec<Ident>),
++    /// `#{` id `,` ... `}` - bind object map properties by name.
++    Map(FnArgsVec<Ident>),
++}
++
++impl VarPattern {
++    /// Get the variables bound by this pattern.
++    #[inline(always)]
++    #[must_use]
++    pub fn variables(&self) -> &[Ident] {
++        match self {
++            Self::Array(vars) | Self::Map(vars) => vars,
++        }
++    }
++}
++
+ /// _(internals)_ A statement.
+ /// Exported under the `internals` feature only.
+ #[derive(Debug, Clone, Hash)]
+@@ -478,6 +500,12 @@ pub enum Stmt {
+     /// * [`EXPORTED`][ASTFlags::EXPORTED] = `export`  
+     /// * [`CONSTANT`][ASTFlags::CONSTANT] = `const`
+     Var(Box<(Ident, Expr, Option<NonZeroUsize>)>, ASTFlags, Position),
++    /// `let`|`const` `[` id `,` ... `]` `=` expr, or `let`|`const` `#{` id `,` ... `}` `=` expr
++    ///
++    /// ### Flags
++    ///
++    /// * [`CONSTANT`][ASTFlags::CONSTANT] = `const`
++    VarPattern(Box<(VarPattern, Expr)>, ASTFlags, Position),
+     /// expr op`=` expr
+     Assignment(Box<(OpAssignment, BinaryExpr)>),
+     /// func `(` expr `,` ... `)`
+@@ -548,6 +576,7 @@ impl Stmt {
+         match self {
+             Self::Do(_, options, _)
+             | Self::Var(_, options, _)
++            | Self::VarPattern(_, options, _)
+             | Self::BreakLoop(_, options, _)
+             | Self::Return(_, options, _) => *options,
+ 
+@@ -583,6 +612,7 @@ impl Stmt {
+             | Self::For(.., pos)
+             | Self::Return(.., pos)
+             | Self::Var(.., pos)
++            | Self::VarPattern(.., pos)
+             | Self::TryCatch(.., pos) => *pos,
+ 
+             Self::Assignment(x) => x.0.pos,
+@@ -613,6 +643,7 @@ impl Stmt {
+             | Self::For(.., pos)
+             | Self::Return(.., pos)
+             | Self::Var(.., pos)
++            | Self::VarPattern(.., pos)
+             | Self::TryCatch(.., pos) => *pos = new_pos,
+ 
+             Self::Assignment(x) => x.0.pos = new_pos,
+@@ -650,7 +681,11 @@ impl Stmt {
+             | Self::For(..)
+             | Self::TryCatch(..) => false,
+ 
+-            Self::Var(..) | Self::Assignment(..) | Self::BreakLoop(..) | Self::Return(..) => false,
++            Self::Var(..)
++            | Self::VarPattern(..)
++            | Self::Assignment(..)
++            | Self::BreakLoop(..)
++            | Self::Return(..) => false,
+ 
+             #[cfg(not(feature = "no_module"))]
+             Self::Import(..) | Self::Export(..) => false,
+@@ -680,6 +715,7 @@ impl Stmt {
+             },
+ 
+             Self::Var(..)
++            | Self::VarPattern(..)
+             | Self::Assignment(..)
+             | Self::FnCall(..)
+             | Self::Do(..)
+@@ -741,7 +777,7 @@ impl Stmt {
+             // so infinite loops can never occur.
+             Self::For(x, ..) => x.2.expr.is_pure() && x.2.body.iter().all(Self::is_pure),
+ 
+-            Self::Var(..) | Self::Assignment(..) | Self::FnCall(..) => false,
++            Self::Var(..) | Self::VarPattern(..) | Self::Assignment(..) | Self::FnCall(..) => false,
+             Self::Block(block, ..) => block.iter().all(Self::is_pure),
+             Self::BreakLoop(..) | Self::Return(..) => false,
+             Self::TryCatch(x, ..) => {
+@@ -770,7 +806,7 @@ impl Stmt {
+     #[must_use]
+     pub fn is_block_dependent(&self) -> bool {
+         match self {
+-            Self::Var(..) => true,
++            Self::Var(..) | Self::VarPattern(..) => true,
+ 
+             Self::Expr(e) => match &**e {
+                 Expr::Stmt(s) => s.iter().all(Self::is_block_dependent),
+@@ -802,6 +838,8 @@ impl Stmt {
+     pub fn is_internally_pure(&self) -> bool {
+         match self {
+             Self::Var(x, ..) => x.1.is_pure(),
++            // Destructuring fails on values of the wrong shape.
++            Self::VarPattern(..) => false,
+ 
+             Self::Expr(e) => match &**e {
+                 Expr::Stmt(s) => s.iter().all(Self::is_internally_pure),
+@@ -847,6 +885,11 @@ impl Stmt {
+         }
+ 
+         match self {
++            Self::VarPattern(x, ..) => {
++                if !x.1.walk(path, on_node) {
++                    return false;
++                }
++            }
+             Self::Var(x, ..) => {
+                 if !x.1.walk(path, on_node) {
+                     return false;
+diff --git a/src/eval/stmt.rs b/src/eval/stmt.rs
+index e2b1d8f..99ed618 100644
+--- a/src/eval/stmt.rs
++++ b/src/eval/stmt.rs
+@@ -477,6 +477,113 @@ impl Engine {
+                 Ok(Dynamic::UNIT)
+             }
+ 
++            // Destructuring variable definition
++            #[cfg(any(not(feature = "no_index"), not(feature = "no_object")))]
++            Stmt::VarPattern(x, options, pos) => {
++                let (pattern, expr) = &**x;
++                let vars = pattern.variables();
++
++                let access = if options.contains(ASTFlags::CONSTANT) {
++                    AccessMode::ReadOnly
++                } else {
++                    AccessMode::ReadWrite
++                };
++
++                for var in vars {
++                    if !self.allow_shadowing() && scope.contains(var.as_str()) {
++                        return Err(
++                            ERR::ErrorVariableExists(var.as_str().to_string(), var.pos).into()
++                        );
++                    }
++
++                    // Check variable definition filter
++                    if let Some(ref filter) = self.def_var_filter {
++                        let will_shadow = scope.contains(var.as_str());
++                        let is_const = access == AccessMode::ReadOnly;
++                        let info = VarDefInfo::new(
++                            var.as_str(),
++                            is_const,
++                            global.scope_level,
++                            will_shadow,
++                        );
++                        let orig_scope_len = scope.len();
++                        let context =
++                            EvalContext::new(self, global, caches, scope, this_ptr.as_deref_mut());
++                        let filter_result = filter(true, info, context);
++
++                        if orig_scope_len != scope.len() {
++                            // The scope is changed, always search from now on
++                            global.always_search_scope = true;
++                        }
++
++                        if !filter_result? {
++                            return Err(ERR::ErrorForbiddenVariable(
++                                var.as_str().to_string(),
++                                var.pos,
++                            )
++                            .into());
++                        }
++                    }
++                }
++
++                // Guard against too many variables
++                #[cfg(not(feature = "unchecked"))]
++                if scope.len() + vars.len() > self.max_variables() {
++                    return Err(ERR::ErrorTooManyVariables(*pos).into());
++                }
++
++                let value = self
++                    .eval_expr(global, caches, scope, this_ptr, expr)?
++                    .flatten();
++
++                let values: crate::FnArgsVec<Dynamic> = match pattern {
++                    #[cfg(not(feature = "no_index"))]
++                    crate::ast::VarPattern::Array(..) => {
++                        let array = value.into_array().map_err(|typ| {
++                            self.make_type_mismatch_err::<crate::Array>(typ, expr.position())
++                        })?;
++
++                        if array.len() != vars.len() {
++                            return Err(ERR::ErrorMismatchDataType(
++                                format!("array of {} element(s)", vars.len()),
++                                format!("array of {} element(s)", array.len()),
++                                expr.position(),
++                            )
++                            .into());
++                        }
++
++                        array.into_iter().collect()
++                    }
++                    #[cfg(not(feature = "no_object"))]
++                    crate::ast::VarPattern::Map(..) => {
++                        let type_name = value.type_name();
++                        let mut map = value.try_cast::<crate::Map>().ok_or_else(|| {
++                            self.make_type_mismatch_err::<crate::Map>(type_name, expr.position())
++                        })?;
++
++                        vars.iter()
++                            .map(|var| match map.remove(var.as_str()) {
++                                Some(value) => Ok(value),
++                                None if self.fail_on_invalid_map_property() => Err(
++                                    ERR::ErrorPropertyNotFound(var.as_str().to_string(), var.pos)
++                                        .into(),
++                                ),
++                                None => Ok(Dynamic::UNIT),
++                            })
++                            .collect::<RhaiResultOf<_>>()?
++                    }
++                    #[allow(unreachable_patterns)]
++                    _ => unreachable!("unknown destructuring pattern: {:?}", pattern),
++                };
++
++                for (var, value) in vars.iter().zip(values) {
++                    let value = self.intern_string(value.flatten());
++                    scope.push_entry(var.name.clone(), access, value);
++                }
++
++                Ok(Dynamic::UNIT)
++            }
++
+             // If statement
+             Stmt::If(x, ..) => {
+                 let FlowControl { expr, body, branch } = &**x;
+diff --git a/src/grain/compile/mod.rs b/src/grain/compile/mod.rs
+index e4566f5..25941bd 100644
+--- a/src/grain/compile/mod.rs
++++ b/src/grain/compile/mod.rs
+@@ -1043,6 +1043,10 @@ impl Lowering {
+             // not the `Expr::FnCall` one. See there for why it defeats the
+             // lowering rather than becoming a fragment.
+             Stmt::FnCall(call, ..) if call.name == crate::engine::KEYWORD_EVAL => Lowered::Defeated,
++            // Destructuring binds several slots at once from a runtime-shaped value,
++            // which the slot model does not represent.
++            #[cfg(any(not(feature = "no_index"), not(feature = "no_object")))]
++            Stmt::VarPattern(..) => Lowered::Defeated,
+ 
+             // `this` on the left. Ahead of the two variable arms because Rhai's
+             // parser puts it there too, and because the chain arm below would
+diff --git a/src/lib.rs b/src/lib.rs
+index 64d4013..9c2eedf 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -377,7 +377,7 @@ pub use api::default_limits;
+ #[cfg(not(feature = "no_ast"))]
+ pub use ast::{
+     ASTFlags, ASTNode, BinaryExpr, Expr, FlowControl, FnCallExpr, OpAssignment, Stmt, StmtBlock,
+-    SwitchCasesCollection,
++    SwitchCasesCollection, VarPattern,
+ };
+ 
+ #[cfg(feature = "internals")]
+diff --git a/src/optimizer.rs b/src/optimizer.rs
+index 4d4954e..47bd9b1 100644
+--- a/src/optimizer.rs
++++ b/src/optimizer.rs
+@@ -226,6 +226,15 @@ fn optimize_stmt_block(
+                     };
+                     state.push_var(x.0.name.clone(), value);
+                 }
++                // Destructured variables are never propagated as constants
++                #[cfg(any(not(feature = "no_index"), not(feature = "no_object")))]
++                Stmt::VarPattern(x, ..) => {
++                    optimize_expr(&mut x.1, state, false);
++
++                    for var in x.0.variables() {
++                        state.push_var(var.name.clone(), None);
++                    }
++                }
+                 // Optimize the statement, preserve result if necessary only for the last one
+                 _ => optimize_stmt(stmt, state, preserve_result && (index >= len - 1)),
+             }
+@@ -801,6 +810,9 @@ fn optimize_stmt(stmt: &mut Stmt, state: &mut OptimizerState, preserve_result: b
+         Stmt::Var(x, options, ..) if !options.contains(ASTFlags::CONSTANT) => {
+             optimize_expr(&mut x.1, state, false);
+         }
++        // let [ ... ] = expr;
++        #[cfg(any(not(feature = "no_index"), not(feature = "no_object")))]
++        Stmt::VarPattern(x, ..) => optimize_expr(&mut x.1, state, false),
+         // import expr as var;
+         #[cfg(not(feature = "no_module"))]
+         Stmt::Import(x, ..) => optimize_expr(&mut x.0, state, false),
+diff --git a/src/parser.rs b/src/parser.rs
+index 858e6e0..0b820fe 100644
+--- a/src/parser.rs
++++ b/src/parser.rs
+@@ -2915,37 +2915,20 @@ impl Engine {
+         // let/const... (specified in `var_type`)
+         settings.pos = state.input.next().unwrap().1;
+ 
+-        // let name ...
+-        let (name, pos) = parse_var_name(state.input)?;
+-
+-        if !self.allow_shadowing() && state.stack.get(&name).is_some() {
+-            return Err(PERR::VariableExists(name.into()).into_err(pos));
++        // let [ ... ] = expr
++        // let #{ ... } = expr
++        #[cfg(any(not(feature = "no_index"), not(feature = "no_object")))]
++        if matches!(
++            state.input.peek().unwrap().0,
++            Token::LeftBracket | Token::MapStart
++        ) {
++            return self.parse_let_pattern(state, settings, access, is_export);
+         }
+ 
+-        if let Some(ref filter) = self.def_var_filter {
+-            let will_shadow = state.stack.get(&name).is_some();
+-
+-            let global = state
+-                .global
+-                .get_or_insert_with(|| self.new_global_runtime_state().into());
+-
+-            global.level = settings.level;
+-            let is_const = access == AccessMode::ReadOnly;
+-            let info = VarDefInfo::new(&name, is_const, settings.level, will_shadow);
+-            let caches = &mut Caches::new();
+-            let context = EvalContext::new(self, global, caches, &mut state.stack, None);
++        // let name ...
++        let (name, pos) = parse_var_name(state.input)?;
+ 
+-            match filter(false, info, context) {
+-                Ok(true) => (),
+-                Ok(false) => return Err(PERR::ForbiddenVariable(name.into()).into_err(pos)),
+-                Err(err) => {
+-                    return Err(match *err {
+-                        EvalAltResult::ErrorParsing(e, pos) => e.into_err(pos),
+-                        _ => PERR::ForbiddenVariable(name.into()).into_err(pos),
+-                    })
+-                }
+-            }
+-        }
++        self.check_var_definition(state, settings, &name, pos, access)?;
+ 
+         let name = self.get_interned_string(name);
+ 
+@@ -3003,6 +2986,149 @@ impl Engine {
+         })
+     }
+ 
++    /// Check whether a new variable can be defined, according to the shadowing rules
++    /// and the variable definition filter.
++    fn check_var_definition(
++        &self,
++        state: &mut ParseState,
++        settings: ParseSettings,
++        name: &str,
++        pos: Position,
++        access: AccessMode,
++    ) -> ParseResult<()> {
++        if !self.allow_shadowing() && state.stack.get(name).is_some() {
++            return Err(PERR::VariableExists(name.into()).into_err(pos));
++        }
++
++        if let Some(ref filter) = self.def_var_filter {
++            let will_shadow = state.stack.get(name).is_some();
++
++            let global = state
++                .global
++                .get_or_insert_with(|| self.new_global_runtime_state().into());
++
++            global.level = settings.level;
++            let is_const = access == AccessMode::ReadOnly;
++            let info = VarDefInfo::new(name, is_const, settings.level, will_shadow);
++            let caches = &mut Caches::new();
++            let context = EvalContext::new(self, global, caches, &mut state.stack, None);
++
++            match filter(false, info, context) {
++                Ok(true) => (),
++                Ok(false) => return Err(PERR::ForbiddenVariable(name.into()).into_err(pos)),
++                Err(err) => {
++                    return Err(match *err {
++                        EvalAltResult::ErrorParsing(e, pos) => e.into_err(pos),
++                        _ => PERR::ForbiddenVariable(name.into()).into_err(pos),
++                    })
++                }
++            }
++        }
++
++        Ok(())
++    }
++
++    /// Parse a destructuring variable definition.
++    #[cfg(any(not(feature = "no_index"), not(feature = "no_object")))]
++    fn parse_let_pattern(
++        &self,
++        state: &mut ParseState,
++        settings: ParseSettings,
++        access: AccessMode,
++        is_export: bool,
++    ) -> ParseResult<Stmt> {
++        let (token, pos) = state.input.next().unwrap();
++
++        if is_export {
++            return Err(PERR::WrongExport.into_err(pos));
++        }
++
++        let close = match token {
++            #[cfg(not(feature = "no_index"))]
++            Token::LeftBracket => Token::RightBracket,
++            #[cfg(not(feature = "no_object"))]
++            Token::MapStart => Token::RightBrace,
++            _ => return Err(PERR::VariableExpected.into_err(pos)),
++        };
++
++        let mut vars = FnArgsVec::<Ident>::new();
++
++        loop {
++            if match_token(state.input, &close).0 {
++                break;
++            }
++
++            let (name, pos) = parse_var_name(state.input)?;
++
++            if vars.iter().any(|v| v.name == name) {
++                return Err(PERR::DuplicatedVariable(name.into()).into_err(pos));
++            }
++
++            vars.push(Ident {
++                name: self.get_interned_string(name),
++                pos,
++            });
++
++            match state.input.next().unwrap() {
++                (Token::Comma, ..) => (),
++                (t, ..) if t == close => break,
++                (Token::LexError(err), pos) => return Err(err.into_err(pos)),
++                (.., pos) => {
++                    return Err(PERR::MissingToken(
++                        close.literal_syntax().into(),
++                        "to end the list of variables".into(),
++                    )
++                    .into_err(pos))
++                }
++            }
++        }
++
++        if vars.is_empty() {
++            return Err(PERR::VariableExpected.into_err(pos));
++        }
++
++        // Check the variables before any of them are defined, as they may shadow each other
++        for var in &vars {
++            self.check_var_definition(state, settings, &var.name, var.pos, access)?;
++        }
++
++        // [ ... ] = expr
++        let (has_equals, eq_pos) = match_token(state.input, &Token::Equals);
++        if !has_equals {
++            return Err(PERR::MissingToken(
++                Token::Equals.literal_syntax().into(),
++                "to assign the value to destructure".into(),
++            )
++            .into_err(eq_pos));
++        }
++        let expr = self.parse_expr(state, settings.level_up()?)?;
++
++        for var in &vars {
++            state
++                .stack
++                .push_entry(var.name.clone(), access, Dynamic::UNIT);
++        }
++
++        let pattern = match close {
++            #[cfg(not(feature = "no_index"))]
++            Token::RightBracket => crate::ast::VarPattern::Array(vars),
++            #[cfg(not(feature = "no_object"))]
++            Token::RightBrace => crate::ast::VarPattern::Map(vars),
++            _ => unreachable!("invalid closing token for a destructuring pattern"),
++        };
++
++        let flags = match access {
++            AccessMode::ReadWrite => ASTFlags::empty(),
++            AccessMode::ReadOnly => ASTFlags::CONSTANT,
++        };
++
++        Ok(Stmt::VarPattern(
++            (pattern, expr).into(),
++            flags,
++            settings.pos,
++        ))
++    }
++
+     /// Parse an import statement.
+     #[cfg(not(feature = "no_module"))]
+     fn parse_import(&self, state: &mut ParseState, settings: ParseSettings) -> ParseResult<Stmt> {
