@@ -69,6 +69,7 @@ class Collector:
         branch: bool,
         warn: TWarnFn,
         concurrency: list[str],
+        exclude_origin: Callable[[str], bool] | None = None,
     ) -> None:
         """Create a collector.
 
@@ -100,6 +101,10 @@ class Collector:
         (the default).  "thread" can be combined with one of the other three.
         Other values are ignored.
 
+        `exclude_origin` is a function taking a file name, and returning True
+        if code run while a frame from that file is on the call stack should
+        not be recorded.
+
         """
         self.core = core
         self.should_trace = should_trace
@@ -108,6 +113,7 @@ class Collector:
         self.file_mapper = file_mapper
         self.branch = branch
         self.warn = warn
+        self.exclude_origin = exclude_origin
         assert isinstance(concurrency, list), f"Expected a list: {concurrency!r}"
 
         self.pid = os.getpid()
@@ -269,6 +275,8 @@ class Collector:
             tracer.should_start_context = self.should_start_context
         if hasattr(tracer, "switch_context"):
             tracer.switch_context = self.switch_context
+        if hasattr(tracer, "exclude_origin"):
+            tracer.exclude_origin = self.exclude_origin
         if hasattr(tracer, "disable_plugin"):
             tracer.disable_plugin = self.disable_plugin
 

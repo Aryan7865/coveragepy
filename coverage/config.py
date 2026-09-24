@@ -208,6 +208,7 @@ class CoverageConfig(TConfigurable, TPluginConfig):
         self.patch: list[str] = []
         self.plugins: list[str] = []
         self.relative_files = False
+        self.run_exclude_origin: list[str] = []
         self.run_include: list[str] = []
         self.run_omit: list[str] = []
         self.sigterm = False
@@ -271,6 +272,7 @@ class CoverageConfig(TConfigurable, TPluginConfig):
         "report_include",
         "run_omit",
         "run_include",
+        "run_exclude_origin",
         "patch",
     }
 
@@ -418,6 +420,7 @@ class CoverageConfig(TConfigurable, TPluginConfig):
         ("patch", "run:patch", "list"),
         ("plugins", "run:plugins", "list"),
         ("relative_files", "run:relative_files", "boolean"),
+        ("run_exclude_origin", "run:exclude_origin", "list"),
         ("run_include", "run:include", "list"),
         ("run_omit", "run:omit", "list"),
         ("sigterm", "run:sigterm", "boolean"),

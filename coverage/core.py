@@ -83,6 +83,9 @@ class Core:
         if config.timid:
             core_name = "pytrace"
             _debug("core.py: Using pytrace because timid=True")
+        elif config.run_exclude_origin:
+            core_name = "pytrace"
+            _debug("core.py: Using pytrace because exclude_origin is set")
         elif core_name is None:
             # This could still leave core_name as None.
             core_name = config.core

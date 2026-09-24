@@ -85,6 +85,7 @@ class PyTracer(Tracer):
         self.should_trace_cache: dict[str, TFileDisposition | None]
         self.should_start_context: TShouldStartContextFn | None = None
         self.switch_context: Callable[[str | None], None] | None = None
+        self.exclude_origin: Callable[[str], bool] | None = None
         self.lock_data: Callable[[], None]
         self.unlock_data: Callable[[], None]
         self.warn: TWarnFn
@@ -216,9 +217,9 @@ class PyTracer(Tracer):
             # don't have to re-check whether to trace the corresponding
             # function (which is a little bit expensive since it involves
             # dictionary lookups). This optimization is only correct if we
-            # didn't start a context.
+            # didn't start a context, and aren't excluding by origin.
             filename = frame.f_code.co_filename
-            if filename != self.cur_file_name or started_context:
+            if filename != self.cur_file_name or started_context or self.exclude_origin:
                 self.cur_file_name = filename
                 disp = self.should_trace_cache.get(filename)
                 if disp is None:
@@ -240,6 +241,15 @@ class PyTracer(Tracer):
                     frame.f_trace_lines = False
             elif not self.cur_file_data:
                 frame.f_trace_lines = False
+
+            # Don't record anything while an excluded origin is on the stack.
+            if self.cur_file_data is not None and self.exclude_origin:
+                origin: FrameType | None = frame
+                while origin is not None:
+                    if self.exclude_origin(origin.f_code.co_filename):  # pylint: disable=not-callable
+                        self.cur_file_data = None
+                        break
+                    origin = origin.f_back
 
             # The call event is really a "start frame" event, and happens for
             # function calls and re-entering generators.  The f_lasti field is

@@ -36,7 +36,15 @@ from coverage.debug import (
 )
 from coverage.disposition import disposition_debug_msg
 from coverage.exceptions import ConfigError, CoverageException, CoverageWarning, PluginError
-from coverage.files import PathAliases, abs_file, relative_filename, set_relative_directory
+from coverage.files import (
+    GlobMatcher,
+    PathAliases,
+    abs_file,
+    canonical_filename,
+    prep_patterns,
+    relative_filename,
+    set_relative_directory,
+)
 from coverage.html import HtmlReporter
 from coverage.inorout import InOrOut
 from coverage.jsonreport import JsonReporter
@@ -595,6 +603,21 @@ class Coverage(TConfigurable):
             config=self.config,
             dynamic_contexts=(should_start_context is not None),
         )
+
+        exclude_origin: Callable[[str], bool] | None = None
+        if self.config.run_exclude_origin:
+            origin_match = GlobMatcher(
+                prep_patterns(self.config.run_exclude_origin), "exclude_origin"
+            )
+            origin_cache: dict[str, bool] = {}
+
+            def exclude_origin(filename: str) -> bool:
+                excluded = origin_cache.get(filename)
+                if excluded is None:
+                    excluded = origin_match.match(canonical_filename(filename))
+                    origin_cache[filename] = excluded
+                return excluded
+
         self._collector = Collector(
             core=self._core,
             should_trace=self._should_trace,
@@ -604,6 +627,7 @@ class Coverage(TConfigurable):
             branch=self.config.branch,
             warn=self._warn,
             concurrency=concurrency,
+            exclude_origin=exclude_origin,
         )
 
         suffix = self._data_suffix_specified
