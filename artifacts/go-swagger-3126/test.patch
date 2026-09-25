@@ -1,0 +1,1694 @@
+diff --git a/fixtures/enhancements/shared-responses-5d81c9/collisions.yaml b/fixtures/enhancements/shared-responses-5d81c9/collisions.yaml
+new file mode 100644
+index 00000000..e3ae943d
+--- /dev/null
++++ b/fixtures/enhancements/shared-responses-5d81c9/collisions.yaml
+@@ -0,0 +1,170 @@
++swagger: '2.0'
++info:
++  title: collisions
++  version: '1.0.0'
++consumes:
++  - application/json
++produces:
++  - application/json
++paths:
++  /thing:
++    get:
++      operationId: getThing
++      parameters:
++        - name: limit
++          in: query
++          type: integer
++      responses:
++        200:
++          description: the thing
++        400:
++          $ref: '#/responses/GetThing'
++        404:
++          $ref: '#/responses/getThingParams'
++        418:
++          $ref: '#/responses/CollisionsAPI'
++        422:
++          $ref: '#/responses/postThing'
++        429:
++          $ref: '#/responses/Client'
++        501:
++          $ref: '#/responses/listThingsNotImplemented'
++        503:
++          $ref: '#/responses/New'
++    post:
++      operationId: postThing
++      parameters:
++        - name: thing
++          in: body
++          required: true
++          schema:
++            type: object
++            properties:
++              name:
++                type: string
++      responses:
++        201:
++          description: created
++        400:
++          $ref: '#/responses/GetThing'
++        409:
++          $ref: '#/responses/PostThingBody'
++        418:
++          $ref: '#/responses/CollisionsAPI'
++        501:
++          $ref: '#/responses/listThingsNotImplemented'
++        503:
++          $ref: '#/responses/New'
++  /things:
++    get:
++      operationId: listThings
++      responses:
++        200:
++          description: the things
++        404:
++          $ref: '#/responses/getThingParams'
++        409:
++          $ref: '#/responses/PostThingBody'
++        410:
++          $ref: '#/responses/Gone'
++        412:
++          $ref: '#/responses/GoneBody'
++        422:
++          $ref: '#/responses/postThing'
++        429:
++          $ref: '#/responses/Client'
++        451:
++          $ref: '#/responses/busy'
++        default:
++          $ref: '#/responses/ClientService'
++  /things/{id}:
++    parameters:
++      - name: id
++        in: path
++        required: true
++        type: string
++    delete:
++      operationId: deleteThing
++      responses:
++        204:
++          description: deleted
++        410:
++          $ref: '#/responses/Gone'
++        412:
++          $ref: '#/responses/GoneBody'
++        451:
++          $ref: '#/responses/Busy'
++        default:
++          $ref: '#/responses/ClientService'
++    put:
++      operationId: putThing
++      responses:
++        200:
++          description: updated
++        451:
++          $ref: '#/responses/Busy'
++    patch:
++      operationId: patchThing
++      responses:
++        200:
++          description: patched
++        451:
++          $ref: '#/responses/busy'
++responses:
++  GetThing:
++    description: named like the type of an operation
++    schema:
++      $ref: '#/definitions/Problem'
++  getThingParams:
++    description: named like the parameters of an operation
++    schema:
++      $ref: '#/definitions/Problem'
++  CollisionsAPI:
++    description: named like the API
++  postThing:
++    description: named like an operation, with an inline body
++    schema:
++      type: object
++      properties:
++        reason:
++          type: string
++  PostThingBody:
++    description: named like the body parameter of an operation
++    schema:
++      $ref: '#/definitions/Problem'
++  Client:
++    description: named like the client
++  ClientService:
++    description: named like the client service
++    schema:
++      $ref: '#/definitions/Problem'
++  New:
++    description: named like the client constructor
++  listThingsNotImplemented:
++    description: named like the responder of an operation which is not implemented
++  Gone:
++    description: gone, with an inline body
++    schema:
++      type: object
++      properties:
++        since:
++          type: string
++          format: date-time
++  GoneBody:
++    description: named like the body of another shared response
++    schema:
++      $ref: '#/definitions/Problem'
++  Busy:
++    description: busy
++    schema:
++      $ref: '#/definitions/Problem'
++  busy:
++    description: busy, with another name
++    schema:
++      type: string
++definitions:
++  Problem:
++    type: object
++    properties:
++      message:
++        type: string
+diff --git a/fixtures/enhancements/shared-responses-5d81c9/documents-paths.yaml b/fixtures/enhancements/shared-responses-5d81c9/documents-paths.yaml
+new file mode 100644
+index 00000000..c4a046c4
+--- /dev/null
++++ b/fixtures/enhancements/shared-responses-5d81c9/documents-paths.yaml
+@@ -0,0 +1,9 @@
++paths:
++  /j:
++    get:
++      operationId: getJ
++      responses:
++        200:
++          description: ok
++        403:
++          $ref: 'documents-responses.yaml#/responses/Denied'
+diff --git a/fixtures/enhancements/shared-responses-5d81c9/documents-responses.yaml b/fixtures/enhancements/shared-responses-5d81c9/documents-responses.yaml
+new file mode 100644
+index 00000000..5583ecc2
+--- /dev/null
++++ b/fixtures/enhancements/shared-responses-5d81c9/documents-responses.yaml
+@@ -0,0 +1,8 @@
++responses:
++  Denied:
++    description: access denied
++    schema:
++      type: object
++      properties:
++        reason:
++          type: string
+diff --git a/fixtures/enhancements/shared-responses-5d81c9/documents.yaml b/fixtures/enhancements/shared-responses-5d81c9/documents.yaml
+new file mode 100644
+index 00000000..c5c7b313
+--- /dev/null
++++ b/fixtures/enhancements/shared-responses-5d81c9/documents.yaml
+@@ -0,0 +1,50 @@
++swagger: '2.0'
++info:
++  title: documents
++  version: '1.0.0'
++produces:
++  - application/json
++paths:
++  /h:
++    get:
++      operationId: getH
++      responses:
++        200:
++          description: ok
++        403:
++          $ref: 'documents-responses.yaml#/responses/Denied'
++        404:
++          $ref: '#/responses/Denied'
++  /i:
++    get:
++      operationId: getI
++      responses:
++        200:
++          description: ok
++        403:
++          $ref: './documents-responses.yaml#/responses/Denied'
++        404:
++          $ref: '#/responses/Denied'
++  /j:
++    $ref: 'documents-paths.yaml#/paths/~1j'
++  /k:
++    get:
++      operationId: getK
++      responses:
++        200:
++          description: ok
++        403:
++          $ref: '#/responses/Denied'
++  /l:
++    get:
++      operationId: getL
++      responses:
++        200:
++          description: ok
++        403:
++          $ref: '#/responses/Denied'
++responses:
++  Denied:
++    description: not found here, although named like another response
++    schema:
++      type: string
+diff --git a/fixtures/enhancements/shared-responses-5d81c9/partitions.yaml b/fixtures/enhancements/shared-responses-5d81c9/partitions.yaml
+new file mode 100644
+index 00000000..f0a8bae4
+--- /dev/null
++++ b/fixtures/enhancements/shared-responses-5d81c9/partitions.yaml
+@@ -0,0 +1,116 @@
++swagger: '2.0'
++info:
++  title: partitions
++  version: '1.0.0'
++produces:
++  - application/json
++paths:
++  /a:
++    get:
++      operationId: getA
++      responses:
++        200:
++          description: ok
++        401:
++          $ref: '#/responses/Denied'
++        403:
++          $ref: '#/responses/Denied'
++        default:
++          $ref: '#/responses/Oops'
++  /b:
++    get:
++      operationId: getB
++      responses:
++        200:
++          description: ok
++        401:
++          $ref: '#/responses/Denied'
++        403:
++          $ref: '#/responses/Denied'
++        default:
++          $ref: '#/responses/Oops'
++  /c:
++    get:
++      operationId: getC
++      responses:
++        200:
++          description: ok
++        401:
++          $ref: '#/responses/Denied'
++        409:
++          $ref: '#/responses/FirstClash'
++  /d:
++    get:
++      operationId: getD
++      responses:
++        200:
++          description: ok
++        409:
++          $ref: '#/responses/SecondClash'
++  /e:
++    get:
++      operationId: getE
++      responses:
++        200:
++          description: ok
++        409:
++          $ref: '#/responses/FirstClash'
++  /f:
++    get:
++      operationId: getF
++      responses:
++        200:
++          description: ok
++        409:
++          $ref: '#/responses/SecondClash'
++  /g:
++    get:
++      operationId: getG
++      responses:
++        200:
++          description: ok
++        401:
++          $ref: '#/responses/Lonely'
++        403:
++          $ref: '#/responses/Lonely'
++responses:
++  Denied:
++    description: access denied
++    x-go-name: AccessDenied
++    headers:
++      X-Reason:
++        type: string
++    schema:
++      $ref: '#/definitions/Problem'
++  Oops:
++    description: unexpected error
++    x-go-name: AccessDenied
++    schema:
++      $ref: '#/definitions/Problem'
++  FirstClash:
++    description: first kind of conflict
++    x-go-name: Clash
++    schema:
++      type: object
++      properties:
++        first:
++          type: string
++  SecondClash:
++    description: second kind of conflict
++    x-go-name: Clash
++    schema:
++      type: object
++      properties:
++        second:
++          type: integer
++  Lonely:
++    description: only used by one operation, under two status codes
++    x-go-name: Solo
++    schema:
++      $ref: '#/definitions/Problem'
++definitions:
++  Problem:
++    type: object
++    properties:
++      message:
++        type: string
+diff --git a/fixtures/enhancements/shared-responses-5d81c9/tagged.yaml b/fixtures/enhancements/shared-responses-5d81c9/tagged.yaml
+new file mode 100644
+index 00000000..34add894
+--- /dev/null
++++ b/fixtures/enhancements/shared-responses-5d81c9/tagged.yaml
+@@ -0,0 +1,102 @@
++swagger: '2.0'
++info:
++  title: tagged
++  version: '1.0.0'
++produces:
++  - application/json
++tags:
++  - name: pets
++  - name: stores
++  - name: orders
++paths:
++  /pets:
++    get:
++      operationId: listPets
++      tags: [pets]
++      responses:
++        200:
++          description: the pets
++        403:
++          $ref: '#/responses/Denied'
++        default:
++          $ref: '#/responses/Failure'
++    post:
++      operationId: addPet
++      tags: [pets]
++      responses:
++        201:
++          description: added
++        403:
++          $ref: '#/responses/Denied'
++        default:
++          $ref: '#/responses/Failure'
++  /stores:
++    get:
++      operationId: listStores
++      tags: [stores]
++      responses:
++        200:
++          description: the stores
++        403:
++          $ref: '#/responses/Denied'
++        default:
++          $ref: '#/responses/Failure'
++  /stores/{id}/pets:
++    parameters:
++      - name: id
++        in: path
++        required: true
++        type: integer
++    get:
++      operationId: listStorePets
++      tags: [stores, pets]
++      responses:
++        200:
++          description: the pets in a store
++        403:
++          $ref: '#/responses/Denied'
++  /orders:
++    get:
++      operationId: listOrders
++      tags: [orders]
++      responses:
++        200:
++          description: the orders
++        403:
++          $ref: '#/responses/Denied'
++        default:
++          $ref: '#/responses/Failure'
++  /health:
++    get:
++      operationId: health
++      responses:
++        200:
++          description: healthy
++        default:
++          $ref: '#/responses/Failure'
++  /version:
++    get:
++      operationId: version
++      responses:
++        200:
++          description: the version
++        default:
++          $ref: '#/responses/Failure'
++responses:
++  Denied:
++    description: access denied
++    schema:
++      type: object
++      properties:
++        message:
++          type: string
++  Failure:
++    description: something went wrong
++    schema:
++      $ref: '#/definitions/Problem'
++definitions:
++  Problem:
++    type: object
++    properties:
++      message:
++        type: string
+diff --git a/fixtures/enhancements/shared-responses-5d81c9/widgets.yaml b/fixtures/enhancements/shared-responses-5d81c9/widgets.yaml
+new file mode 100644
+index 00000000..ccfdd4dd
+--- /dev/null
++++ b/fixtures/enhancements/shared-responses-5d81c9/widgets.yaml
+@@ -0,0 +1,168 @@
++swagger: '2.0'
++info:
++  title: widgets
++  version: '1.0.0'
++basePath: /api
++consumes:
++  - application/json
++produces:
++  - application/json
++paths:
++  /widgets:
++    get:
++      operationId: listWidgets
++      responses:
++        200:
++          description: the widgets
++          schema:
++            type: array
++            items:
++              $ref: '#/definitions/Widget'
++        403:
++          $ref: '#/responses/Forbidden'
++        404:
++          $ref: '#/responses/NotFound'
++        default:
++          $ref: '#/responses/Error'
++    post:
++      operationId: createWidget
++      parameters:
++        - name: widget
++          in: body
++          required: true
++          schema:
++            $ref: '#/definitions/Widget'
++      responses:
++        201:
++          description: created
++          schema:
++            $ref: '#/definitions/Widget'
++        403:
++          $ref: '#/responses/Forbidden'
++        default:
++          $ref: '#/responses/Error'
++  /widgets/{id}:
++    parameters:
++      - name: id
++        in: path
++        required: true
++        type: string
++    get:
++      operationId: getWidget
++      responses:
++        200:
++          $ref: '#/responses/WidgetFound'
++        403:
++          $ref: '#/responses/Forbidden'
++        404:
++          $ref: '#/responses/NotFound'
++        500:
++          $ref: '#/responses/Error'
++    put:
++      operationId: updateWidget
++      parameters:
++        - name: widget
++          in: body
++          required: true
++          schema:
++            $ref: '#/definitions/Widget'
++      responses:
++        200:
++          $ref: '#/responses/WidgetFound'
++        403:
++          description: forbidden, with a reason specific to updates
++          schema:
++            type: object
++            properties:
++              reason:
++                type: string
++        500:
++          $ref: '#/responses/Error'
++        default:
++          $ref: '#/responses/Error'
++    delete:
++      operationId: deleteWidget
++      responses:
++        204:
++          description: deleted
++        401:
++          $ref: '#/responses/Forbidden'
++        404:
++          $ref: '#/responses/NotFound'
++  /widgets/{id}/archive:
++    parameters:
++      - name: id
++        in: path
++        required: true
++        type: string
++    post:
++      operationId: archiveWidget
++      responses:
++        204:
++          description: archived
++        401:
++          $ref: '#/responses/Forbidden'
++        409:
++          $ref: '#/responses/Conflict'
++responses:
++  Forbidden:
++    description: the caller is not allowed to do this
++    headers:
++      X-Trace-Id:
++        type: string
++    schema:
++      type: object
++      required:
++        - message
++      properties:
++        message:
++          type: string
++        details:
++          type: array
++          items:
++            type: object
++            properties:
++              field:
++                type: string
++  NotFound:
++    description: no such widget
++    schema:
++      $ref: '#/definitions/Problem'
++  Error:
++    description: unexpected error
++    headers:
++      X-Rate-Limit:
++        type: integer
++        format: int32
++        default: 100
++    schema:
++      $ref: '#/definitions/Problem'
++  WidgetFound:
++    description: the widget
++    headers:
++      ETag:
++        type: string
++    schema:
++      $ref: '#/definitions/Widget'
++  Conflict:
++    description: only used once
++    schema:
++      $ref: '#/definitions/Problem'
++definitions:
++  Widget:
++    type: object
++    required:
++      - name
++    properties:
++      id:
++        type: string
++      name:
++        type: string
++  Problem:
++    type: object
++    properties:
++      code:
++        type: integer
++        format: int32
++      message:
++        type: string
+diff --git a/generator/shared_responses_d4e7a1_test.go b/generator/shared_responses_d4e7a1_test.go
+new file mode 100644
+index 00000000..8b74ebad
+--- /dev/null
++++ b/generator/shared_responses_d4e7a1_test.go
+@@ -0,0 +1,956 @@
++// SPDX-FileCopyrightText: Copyright 2015-2025 go-swagger maintainers
++// SPDX-License-Identifier: Apache-2.0
++
++package generator
++
++import (
++	"context"
++	"fmt"
++	"go/ast"
++	"go/parser"
++	"go/token"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"slices"
++	"strconv"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/go-openapi/analysis"
++	"github.com/go-openapi/testify/v2/assert"
++	"github.com/go-openapi/testify/v2/require"
++)
++
++const sharedResponsesFixtures = "../fixtures/enhancements/shared-responses-5d81c9"
++
++const defaultStatus = -1 // stands for the default response
++
++func TestSharedNamedResponsesWithinPackage(t *testing.T) {
++	t.Parallel()
++	defer discardOutput()()
++
++	target := newSharedResponsesModule(t)
++	spec := filepath.Join(sharedResponsesFixtures, "widgets.yaml")
++	generateSharedResponsesServer(t, spec, target)
++	generateSharedResponsesClient(t, spec, target)
++
++	// client operations use shared types
++	client := inspectGeneratedPackage(t, filepath.Join(target, "client", "operations"))
++
++	forbidden := client.assertShared(t, 403, "ListWidgets", "CreateWidget", "GetWidget")
++	unauthorized := client.assertShared(t, 401, "DeleteWidget", "ArchiveWidget")
++	assert.NotEqualf(t, forbidden, unauthorized,
++		"a named response used under different status codes needs a type for each status code")
++	client.assertShared(t, 404, "ListWidgets", "GetWidget", "DeleteWidget")
++	client.assertShared(t, 200, "GetWidget", "UpdateWidget")
++	internalError := client.assertShared(t, 500, "GetWidget", "UpdateWidget")
++	unexpected := client.assertShared(t, defaultStatus, "ListWidgets", "CreateWidget", "UpdateWidget")
++	assert.NotEqualf(t, internalError, unexpected,
++		"the default response is not shared with a response for an explicit status code")
++
++	// responses that are not shared keep their own type
++	assert.Equal(t, "UpdateWidgetForbidden", client.uses["UpdateWidget"][403], "inline response")
++	assert.Equal(t, "ArchiveWidgetConflict", client.uses["ArchiveWidget"][409], "named response used once")
++	assert.Equal(t, "ListWidgetsOK", client.uses["ListWidgets"][200])
++	assert.Equal(t, "CreateWidgetCreated", client.uses["CreateWidget"][201])
++
++	expected := map[int]int{
++		200: 2, 201: 1, 204: 2, 401: 1, 403: 2, 404: 1, 409: 1, 500: 1, defaultStatus: 1,
++	}
++	client.assertTypesByStatus(t, expected)
++
++	// the server declares each shared response once
++	server := inspectGeneratedPackage(t, filepath.Join(target, "restapi", "operations"))
++	server.assertTypesByStatus(t, expected)
++
++	runGoInModule(t, target, "build", "./...")
++}
++
++func TestSharedNamedResponsesClientBehavior(t *testing.T) {
++	t.Parallel()
++	defer discardOutput()()
++
++	target := newSharedResponsesModule(t)
++	spec := filepath.Join(sharedResponsesFixtures, "widgets.yaml")
++	generateSharedResponsesClient(t, spec, target)
++
++	operations := filepath.Join(target, "client", "operations")
++	require.NoError(t, os.WriteFile(filepath.Join(operations, "shared_behavior_test.go"), []byte(sharedResponsesClientProgram), 0o600))
++
++	runGoInModule(t, target, "test", "-count=1", "./client/operations/")
++}
++
++func TestSharedNamedResponsesKeepStatusCodes(t *testing.T) {
++	t.Parallel()
++	defer discardOutput()()
++
++	target := newSharedResponsesModule(t)
++	spec := filepath.Join(sharedResponsesFixtures, "partitions.yaml")
++	generateSharedResponsesServer(t, spec, target)
++	generateSharedResponsesClient(t, spec, target)
++
++	{
++		pkg := inspectGeneratedPackage(t, filepath.Join(target, "client", "operations"))
++
++		// a named response with an x-go-name, shared under two status codes
++		unauthorized := pkg.assertShared(t, 401, "GetA", "GetB", "GetC")
++		forbidden := pkg.assertShared(t, 403, "GetA", "GetB")
++		assert.NotEqual(t, unauthorized, forbidden)
++
++		// another named response with the same x-go-name, used as the default response
++		unexpected := pkg.assertShared(t, defaultStatus, "GetA", "GetB")
++		assert.NotContains(t, []string{unauthorized, forbidden}, unexpected)
++
++		// distinct named responses with the same x-go-name under the same status code
++		first := pkg.assertShared(t, 409, "GetC", "GetE")
++		second := pkg.assertShared(t, 409, "GetD", "GetF")
++		assert.NotEqualf(t, first, second, "different named responses must not share a type")
++
++		// a named response used by a single operation, under two status codes
++		lonelyUnauthorized := pkg.uses["GetG"][401]
++		lonelyForbidden := pkg.uses["GetG"][403]
++		assert.NotEqual(t, lonelyUnauthorized, lonelyForbidden)
++		assert.Equal(t, 401, pkg.statuses[lonelyUnauthorized])
++		assert.Equal(t, 403, pkg.statuses[lonelyForbidden])
++		assert.NotContains(t, []string{unauthorized, forbidden}, lonelyUnauthorized)
++		assert.NotContains(t, []string{unauthorized, forbidden}, lonelyForbidden)
++
++		pkg.assertTypesByStatus(t, map[int]int{401: 2, 403: 2, 409: 2, defaultStatus: 1})
++	}
++
++	server := inspectGeneratedPackage(t, filepath.Join(target, "restapi", "operations"))
++	server.assertTypesByStatus(t, map[int]int{401: 2, 403: 2, 409: 2, defaultStatus: 1})
++
++	runGoInModule(t, target, "build", "./...")
++}
++
++func TestSharedNamedResponsesPerPackage(t *testing.T) {
++	t.Parallel()
++	defer discardOutput()()
++
++	target := newSharedResponsesModule(t)
++	spec := filepath.Join(sharedResponsesFixtures, "tagged.yaml")
++	generateSharedResponsesServer(t, spec, target)
++	generateSharedResponsesClient(t, spec, target)
++
++	for _, side := range []struct {
++		name string
++		root string
++	}{
++		{name: "client", root: filepath.Join(target, "client")},
++		{name: "server", root: filepath.Join(target, "restapi", "operations")},
++	} {
++		{
++			untaggedDir := filepath.Join(side.root, "operations")
++			if side.name == "server" {
++				untaggedDir = side.root
++			}
++
++			pets := inspectGeneratedPackage(t, filepath.Join(side.root, "pets"))
++			stores := inspectGeneratedPackage(t, filepath.Join(side.root, "stores"))
++			orders := inspectGeneratedPackage(t, filepath.Join(side.root, "orders"))
++			untagged := inspectGeneratedPackage(t, untaggedDir)
++
++			// each package declares its own types, and does not refer to another package of operations
++			pets.assertTypesByStatus(t, map[int]int{403: 1, defaultStatus: 1})
++			stores.assertTypesByStatus(t, map[int]int{403: 1, defaultStatus: 1})
++			orders.assertTypesByStatus(t, map[int]int{403: 1, defaultStatus: 1})
++			untagged.assertTypesByStatus(t, map[int]int{defaultStatus: 1})
++
++			for _, pkg := range []*generatedPackage{pets, stores, orders} {
++				for _, imported := range pkg.imports {
++					assert.Falsef(t, strings.HasPrefix(imported, "example.com/sharedresponses/client/") ||
++						strings.HasPrefix(imported, "example.com/sharedresponses/restapi/operations"),
++						"package %s should not depend on another package of operations, but imports %s", pkg.dir, imported)
++				}
++			}
++
++			if side.name == "client" {
++				pets.assertShared(t, 403, "ListPets", "AddPet")
++				pets.assertShared(t, defaultStatus, "ListPets", "AddPet")
++				// listStorePets is generated with the operations tagged "stores"
++				stores.assertShared(t, 403, "ListStores", "ListStorePets")
++				untagged.assertShared(t, defaultStatus, "Health", "Version")
++			}
++		}
++	}
++
++	runGoInModule(t, target, "build", "./...")
++}
++
++func TestSharedNamedResponsesNameCollisions(t *testing.T) {
++	t.Parallel()
++	defer discardOutput()()
++
++	spec := filepath.Join(sharedResponsesFixtures, "collisions.yaml")
++	shared := map[int][]string{
++		400:           {"GetThing", "PostThing"},
++		404:           {"GetThing", "ListThings"},
++		409:           {"PostThing", "ListThings"},
++		410:           {"ListThings", "DeleteThing"},
++		412:           {"ListThings", "DeleteThing"},
++		418:           {"GetThing", "PostThing"},
++		422:           {"GetThing", "ListThings"},
++		429:           {"GetThing", "ListThings"},
++		501:           {"GetThing", "PostThing"},
++		503:           {"GetThing", "PostThing"},
++		defaultStatus: {"ListThings", "DeleteThing"},
++	}
++	counts := map[int]int{
++		400: 1, 404: 1, 409: 1, 410: 1, 412: 1, 418: 1, 422: 1, 429: 1, 451: 2, 501: 1, 503: 1, defaultStatus: 1,
++	}
++
++	t.Run("client", func(t *testing.T) {
++		t.Parallel()
++
++		target := newSharedResponsesModule(t)
++		generateSharedResponsesClient(t, spec, target)
++
++		pkg := inspectGeneratedPackage(t, filepath.Join(target, "client", "operations"))
++		for code, operations := range shared {
++			pkg.assertShared(t, code, operations...)
++		}
++		busy := pkg.assertShared(t, 451, "DeleteThing", "PutThing")
++		otherBusy := pkg.assertShared(t, 451, "ListThings", "PatchThing")
++		assert.NotEqual(t, busy, otherBusy)
++		pkg.assertTypesByStatus(t, counts)
++
++		runGoInModule(t, target, "build", "./...")
++	})
++
++	for _, strict := range []bool{false, true} {
++		t.Run(fmt.Sprintf("server with strict responders: %t", strict), func(t *testing.T) {
++			t.Parallel()
++
++			target := newSharedResponsesModule(t)
++			generateSharedResponsesServer(t, spec, target, func(opts *GenOpts) {
++				opts.StrictResponders = strict
++			})
++
++			pkg := inspectGeneratedPackage(t, filepath.Join(target, "restapi", "operations"))
++			pkg.assertTypesByStatus(t, counts)
++
++			if strict {
++				// the responder of an operation accepts the shared types
++				for code, operations := range shared {
++					pkg.assertShared(t, code, operations...)
++				}
++			}
++
++			runGoInModule(t, target, "build", "./...")
++		})
++	}
++}
++
++func TestSharedNamedResponsesFromOtherDocuments(t *testing.T) {
++	t.Parallel()
++	defer discardOutput()()
++
++	target := newSharedResponsesModule(t)
++	spec := filepath.Join(sharedResponsesFixtures, "documents.yaml")
++	generateSharedResponsesServer(t, spec, target)
++	generateSharedResponsesClient(t, spec, target)
++
++	client := inspectGeneratedPackage(t, filepath.Join(target, "client", "operations"))
++
++	// the same named response, from another document (getJ is defined in yet another document)
++	remote := client.assertShared(t, 403, "GetH", "GetI", "GetJ")
++	// a named response from this document, with the same name as the other one
++	local := client.assertShared(t, 403, "GetK", "GetL")
++	assert.NotEqualf(t, remote, local, "responses with the same name in different documents are different responses")
++	client.assertShared(t, 404, "GetH", "GetI")
++
++	expected := map[int]int{200: 5, 403: 2, 404: 1}
++	client.assertTypesByStatus(t, expected)
++
++	server := inspectGeneratedPackage(t, filepath.Join(target, "restapi", "operations"))
++	server.assertTypesByStatus(t, expected)
++
++	runGoInModule(t, target, "build", "./...")
++}
++
++func TestSharedNamedResponsesSingleOperations(t *testing.T) {
++	t.Parallel()
++	defer discardOutput()()
++
++	spec := filepath.Join(sharedResponsesFixtures, "widgets.yaml")
++	target := newSharedResponsesModule(t)
++
++	models := NewGenOpts(ForModel(), WithSpec(spec), WithTarget(target))
++	require.NoError(t, GenerateModels(nil, models))
++
++	// operations are generated one after the other in the same package, e.g. to add operations to an existing server
++	for _, operations := range [][]string{
++		{"getWidget"},
++		{"deleteWidget"},
++		{"listWidgets", "createWidget"},
++		{"updateWidget", "archiveWidget"},
++	} {
++		opts := NewGenOpts(ForServer(), WithSpec(spec), WithTarget(target))
++		opts.IncludeSupport = false
++		opts.StrictResponders = true
++		require.NoError(t, GenerateServerOperation(operations, opts))
++
++		// the package builds after each step
++		runGoInModule(t, target, "build", "./restapi/operations/")
++	}
++
++	// operations generated separately share responses
++	pkg := inspectGeneratedPackage(t, filepath.Join(target, "restapi", "operations"))
++	pkg.assertShared(t, 403, "ListWidgets", "CreateWidget", "GetWidget")
++	pkg.assertShared(t, 401, "DeleteWidget", "ArchiveWidget")
++	pkg.assertShared(t, 404, "ListWidgets", "GetWidget", "DeleteWidget")
++	pkg.assertShared(t, defaultStatus, "ListWidgets", "CreateWidget", "UpdateWidget")
++	pkg.assertTypesByStatus(t, map[int]int{
++		200: 2, 201: 1, 204: 2, 401: 1, 403: 2, 404: 1, 409: 1, 500: 1, defaultStatus: 1,
++	})
++}
++
++func TestSharedNamedResponsesSingleOperationInTaggedPackage(t *testing.T) {
++	t.Parallel()
++	defer discardOutput()()
++
++	spec := filepath.Join(sharedResponsesFixtures, "tagged.yaml")
++	target := newSharedResponsesModule(t)
++
++	models := NewGenOpts(ForModel(), WithSpec(spec), WithTarget(target))
++	require.NoError(t, GenerateModels(nil, models))
++
++	// listStorePets is tagged "stores" and "pets": it is generated with the operations tagged "stores" only
++	for _, operation := range []string{"listStorePets", "listStores"} {
++		opts := NewGenOpts(ForServer(), WithSpec(spec), WithTarget(target))
++		opts.IncludeSupport = false
++		opts.StrictResponders = true
++		require.NoError(t, GenerateServerOperation([]string{operation}, opts))
++
++		// the package builds on its own, after each step
++		runGoInModule(t, target, "build", "./restapi/operations/...")
++	}
++
++	assert.DirNotExists(t, filepath.Join(target, "restapi", "operations", "pets"))
++
++	stores := inspectGeneratedPackage(t, filepath.Join(target, "restapi", "operations", "stores"))
++	stores.assertShared(t, 403, "ListStorePets", "ListStores")
++	stores.assertTypesByStatus(t, map[int]int{200: 2, 403: 1, defaultStatus: 1})
++	for _, imported := range stores.imports {
++		assert.Falsef(t, strings.HasPrefix(imported, "example.com/sharedresponses/restapi/operations"),
++			"package stores should not depend on another package of operations, but imports %s", imported)
++	}
++}
++
++func TestSharedNamedResponsesSelectedClientOperations(t *testing.T) {
++	t.Parallel()
++	defer discardOutput()()
++
++	spec := filepath.Join(sharedResponsesFixtures, "widgets.yaml")
++
++	full := newSharedResponsesModule(t)
++	generateSharedResponsesClient(t, spec, full)
++	all := inspectGeneratedPackage(t, filepath.Join(full, "client", "operations"))
++
++	target := newSharedResponsesModule(t)
++	opts := NewGenOpts(ForClient(), WithSpec(spec), WithTarget(target))
++	require.NoError(t, GenerateClient("widgets", nil, []string{"getWidget", "deleteWidget"}, opts))
++	selected := inspectGeneratedPackage(t, filepath.Join(target, "client", "operations"))
++
++	selected.assertShared(t, 404, "GetWidget", "DeleteWidget")
++
++	// selecting operations does not change which responses they share
++	for _, operation := range []string{"GetWidget", "DeleteWidget"} {
++		assert.Equalf(t, all.uses[operation], selected.uses[operation],
++			"responses of %s should not depend on the selection of operations", operation)
++	}
++
++	runGoInModule(t, target, "build", "./...")
++}
++
++func TestSharedNamedResponsesBuildVariants(t *testing.T) {
++	t.Parallel()
++	defer discardOutput()()
++
++	spec := filepath.Join(sharedResponsesFixtures, "widgets.yaml")
++
++	t.Run("fully flattened spec", func(t *testing.T) {
++		t.Parallel()
++
++		fullFlatten := func(opts *GenOpts) {
++			opts.FlattenOpts = &analysis.FlattenOpts{Minimal: false, Verbose: false}
++		}
++
++		// generated code is the same each time
++		var generated []map[string]string
++		var target string
++		for range 3 {
++			target = newSharedResponsesModule(t)
++			generateSharedResponsesServer(t, spec, target, fullFlatten)
++			generateSharedResponsesClient(t, spec, target, fullFlatten)
++			generated = append(generated, readGeneratedSources(t, filepath.Join(target, "client", "operations")))
++		}
++		assert.Equal(t, generated[0], generated[1])
++		assert.Equal(t, generated[0], generated[2])
++
++		pkg := inspectGeneratedPackage(t, filepath.Join(target, "client", "operations"))
++		pkg.assertShared(t, 403, "ListWidgets", "CreateWidget", "GetWidget")
++		pkg.assertShared(t, defaultStatus, "ListWidgets", "CreateWidget", "UpdateWidget")
++
++		runGoInModule(t, target, "build", "./...")
++	})
++
++	t.Run("command line client", func(t *testing.T) {
++		t.Parallel()
++
++		target := newSharedResponsesModule(t)
++		opts := NewGenOpts(ForCli(), WithSpec(spec), WithTarget(target))
++		require.NoError(t, GenerateClient("widgets", nil, nil, opts))
++
++		pkg := inspectGeneratedPackage(t, filepath.Join(target, "client", "operations"))
++		pkg.assertShared(t, 200, "GetWidget", "UpdateWidget")
++
++		runGoInModule(t, target, "build", "./...")
++	})
++}
++
++// newSharedResponsesModule creates a go module to generate code into.
++//
++// The module requires the same dependencies as this repository, so the generated code builds from the module cache.
++func newSharedResponsesModule(t *testing.T) string {
++	t.Helper()
++
++	target := t.TempDir()
++
++	goMod, err := os.ReadFile(filepath.Join("..", "go.mod"))
++	require.NoError(t, err)
++	_, requirements, found := strings.Cut(string(goMod), "\n")
++	require.True(t, found)
++	require.NoError(t, os.WriteFile(filepath.Join(target, "go.mod"),
++		[]byte("module example.com/sharedresponses\n"+requirements), 0o600))
++
++	goSum, err := os.ReadFile(filepath.Join("..", "go.sum"))
++	require.NoError(t, err)
++	require.NoError(t, os.WriteFile(filepath.Join(target, "go.sum"), goSum, 0o600))
++
++	return target
++}
++
++func generateSharedResponsesServer(t *testing.T, spec, target string, options ...func(*GenOpts)) {
++	t.Helper()
++
++	opts := NewGenOpts(ForServer(), WithSpec(spec), WithTarget(target))
++	for _, apply := range options {
++		apply(opts)
++	}
++
++	// the API is named after the title of the spec
++	require.NoError(t, GenerateServer("", nil, nil, opts))
++}
++
++func generateSharedResponsesClient(t *testing.T, spec, target string, options ...func(*GenOpts)) {
++	t.Helper()
++
++	opts := NewGenOpts(ForClient(), WithSpec(spec), WithTarget(target))
++	for _, apply := range options {
++		apply(opts)
++	}
++
++	require.NoError(t, GenerateClient("", nil, nil, opts))
++}
++
++func readGeneratedSources(t *testing.T, dir string) map[string]string {
++	t.Helper()
++
++	entries, err := os.ReadDir(dir)
++	require.NoError(t, err)
++
++	sources := make(map[string]string, len(entries))
++	for _, entry := range entries {
++		content, err := os.ReadFile(filepath.Join(dir, entry.Name()))
++		require.NoError(t, err)
++		sources[entry.Name()] = string(content)
++	}
++
++	return sources
++}
++
++func runGoInModule(t *testing.T, dir string, args ...string) {
++	t.Helper()
++
++	const timeout = 5 * time.Minute
++	ctx, cancel := context.WithTimeout(context.Background(), timeout)
++	defer cancel()
++
++	cmd := exec.CommandContext(ctx, "go", args...)
++	cmd.Dir = dir
++	// Dependencies missing from the module are resolved from the module cache first:
++	// this builds without network whenever the dependencies of generated code are cached.
++	cmd.Env = append(os.Environ(), "GOFLAGS=-mod=mod", "GOWORK=off", "GOPROXY="+moduleCacheProxy(t))
++
++	output, err := cmd.CombinedOutput()
++	require.NoErrorf(t, err, "go %s failed in %s:\n%s", strings.Join(args, " "), dir, output)
++}
++
++// moduleCacheProxy uses the module cache as a module proxy, before the configured proxies.
++func moduleCacheProxy(t *testing.T) string {
++	t.Helper()
++
++	goEnv := func(name string) string {
++		output, err := exec.Command("go", "env", name).Output()
++		require.NoError(t, err)
++
++		return strings.TrimSpace(string(output))
++	}
++
++	cache := filepath.ToSlash(filepath.Join(goEnv("GOMODCACHE"), "cache", "download"))
++	if !strings.HasPrefix(cache, "/") {
++		cache = "/" + cache // e.g. file:///C:/...
++	}
++
++	proxy := "file://" + cache
++	if configured := goEnv("GOPROXY"); configured != "" && configured != "off" {
++		proxy += "," + configured
++	}
++
++	return proxy
++}
++
++// generatedPackage describes the responses declared and used in a package of generated code.
++type generatedPackage struct {
++	dir     string
++	imports []string
++	// statuses holds the status code of each response type (-1 for a default response)
++	statuses map[string]int
++	// uses tells which response type an operation uses for each status code.
++	//
++	// For clients, this is found from the reader of the operation.
++	// For servers, this is found from the responder of the operation (with strict responders only).
++	uses map[string]map[int]string
++}
++
++func inspectGeneratedPackage(t *testing.T, dir string) *generatedPackage {
++	t.Helper()
++
++	entries, err := os.ReadDir(dir)
++	require.NoErrorf(t, err, "expected generated package in %s", dir)
++
++	pkg := &generatedPackage{
++		dir:      dir,
++		statuses: make(map[string]int),
++		uses:     make(map[string]map[int]string),
++	}
++
++	fset := token.NewFileSet()
++	var files []*ast.File
++	for _, entry := range entries {
++		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
++			continue
++		}
++
++		file, err := parser.ParseFile(fset, filepath.Join(dir, entry.Name()), nil, parser.SkipObjectResolution)
++		require.NoError(t, err)
++		files = append(files, file)
++
++		for _, spec := range file.Imports {
++			imported, err := strconv.Unquote(spec.Path.Value)
++			require.NoError(t, err)
++			pkg.imports = append(pkg.imports, imported)
++		}
++	}
++
++	// find response types and their status code
++	for _, file := range files {
++		for _, decl := range file.Decls {
++			fn, ok := decl.(*ast.FuncDecl)
++			if !ok || fn.Recv == nil || fn.Body == nil {
++				continue
++			}
++
++			switch fn.Name.Name {
++			case "WriteResponse": // server
++				ast.Inspect(fn.Body, func(node ast.Node) bool {
++					call, ok := node.(*ast.CallExpr)
++					if !ok || len(call.Args) != 1 {
++						return true
++					}
++					if selector, ok := call.Fun.(*ast.SelectorExpr); ok && selector.Sel.Name == "WriteHeader" {
++						pkg.statuses[receiverType(fn)] = statusCode(call.Args[0])
++					}
++
++					return true
++				})
++			case "Code": // client
++				if len(fn.Type.Params.List) == 0 && len(fn.Body.List) == 1 {
++					if ret, ok := fn.Body.List[0].(*ast.ReturnStmt); ok && len(ret.Results) == 1 {
++						pkg.statuses[receiverType(fn)] = statusCode(ret.Results[0])
++					}
++				}
++			}
++		}
++	}
++
++	// find which response types are used by operations
++	for _, file := range files {
++		for _, decl := range file.Decls {
++			fn, ok := decl.(*ast.FuncDecl)
++			if !ok || fn.Recv == nil || fn.Body == nil {
++				continue
++			}
++
++			receiver := receiverType(fn)
++			switch {
++			case fn.Name.Name == "ReadResponse" && strings.HasSuffix(receiver, "Reader"):
++				pkg.collectReader(strings.TrimSuffix(receiver, "Reader"), fn.Body)
++			case strings.HasSuffix(fn.Name.Name, "Responder") && len(fn.Body.List) == 0:
++				code, isResponse := pkg.statuses[receiver]
++				if !isResponse {
++					continue
++				}
++				pkg.use(strings.TrimSuffix(fn.Name.Name, "Responder"), code, receiver)
++			}
++		}
++	}
++
++	return pkg
++}
++
++func (p *generatedPackage) collectReader(operation string, body *ast.BlockStmt) {
++	var cases []*ast.CaseClause
++	ast.Inspect(body, func(node ast.Node) bool {
++		if clause, ok := node.(*ast.CaseClause); ok {
++			cases = append(cases, clause)
++		}
++
++		return true
++	})
++
++	if len(cases) == 0 {
++		// only a default response
++		if constructed := constructedType(body.List); constructed != "" {
++			p.use(operation, defaultStatus, constructed)
++		}
++
++		return
++	}
++
++	for _, clause := range cases {
++		constructed := constructedType(clause.Body)
++		if constructed == "" {
++			continue
++		}
++
++		if len(clause.List) == 0 {
++			p.use(operation, defaultStatus, constructed)
++
++			continue
++		}
++
++		for _, expr := range clause.List {
++			p.use(operation, statusCode(expr), constructed)
++		}
++	}
++}
++
++func (p *generatedPackage) use(operation string, code int, typeName string) {
++	if p.uses[operation] == nil {
++		p.uses[operation] = make(map[int]string)
++	}
++	p.uses[operation][code] = typeName
++}
++
++// assertShared checks that the operations use the same type for their response with this status code,
++// and returns this type.
++func (p *generatedPackage) assertShared(t *testing.T, code int, operations ...string) string {
++	t.Helper()
++
++	var shared string
++	for _, operation := range operations {
++		typeName, ok := p.uses[operation][code]
++		if !assert.Truef(t, ok, "in %s: no response type found for operation %s and status %s (found: %v)",
++			p.dir, operation, statusLabel(code), p.uses[operation]) {
++			continue
++		}
++
++		if shared == "" {
++			shared = typeName
++
++			continue
++		}
++
++		assert.Equalf(t, shared, typeName,
++			"in %s: operations %v should use the same type for their %s response",
++			p.dir, operations, statusLabel(code))
++	}
++
++	if shared != "" {
++		assert.Equalf(t, code, p.statuses[shared], "in %s: type %s should be the response for status %s",
++			p.dir, shared, statusLabel(code))
++	}
++
++	return shared
++}
++
++// assertTypesByStatus checks how many response types are declared for some status codes.
++func (p *generatedPackage) assertTypesByStatus(t *testing.T, expected map[int]int) {
++	t.Helper()
++
++	byStatus := make(map[int][]string)
++	for typeName, code := range p.statuses {
++		byStatus[code] = append(byStatus[code], typeName)
++	}
++
++	for code, count := range expected {
++		types := byStatus[code]
++		slices.Sort(types)
++		assert.Lenf(t, types, count, "in %s: unexpected response types for status %s: %v",
++			p.dir, statusLabel(code), types)
++	}
++}
++
++func receiverType(fn *ast.FuncDecl) string {
++	if len(fn.Recv.List) == 0 {
++		return ""
++	}
++
++	expr := fn.Recv.List[0].Type
++	if star, ok := expr.(*ast.StarExpr); ok {
++		expr = star.X
++	}
++
++	if ident, ok := expr.(*ast.Ident); ok {
++		return ident.Name
++	}
++
++	return ""
++}
++
++// statusCode reads a status code from a literal, or -1 when the code is not constant (default response).
++func statusCode(expr ast.Expr) int {
++	lit, ok := expr.(*ast.BasicLit)
++	if !ok || lit.Kind != token.INT {
++		return defaultStatus
++	}
++
++	code, err := strconv.Atoi(lit.Value)
++	if err != nil {
++		return defaultStatus
++	}
++
++	return code
++}
++
++// constructedType finds the response type built in some statements of a reader, e.g. result := NewXYZ().
++func constructedType(stmts []ast.Stmt) string {
++	var constructed string
++	for _, stmt := range stmts {
++		ast.Inspect(stmt, func(node ast.Node) bool {
++			if constructed != "" {
++				return false
++			}
++
++			call, ok := node.(*ast.CallExpr)
++			if !ok {
++				return true
++			}
++
++			if ident, ok := call.Fun.(*ast.Ident); ok && strings.HasPrefix(ident.Name, "New") {
++				constructed = strings.TrimPrefix(ident.Name, "New")
++
++				return false
++			}
++
++			return true
++		})
++	}
++
++	return constructed
++}
++
++func statusLabel(code int) string {
++	if code == defaultStatus {
++		return "default"
++	}
++
++	return strconv.Itoa(code)
++}
++
++// sharedResponsesClientProgram exercises the generated client with responses from the widgets.yaml fixture.
++const sharedResponsesClientProgram = `package operations
++
++import (
++	"bytes"
++	"io"
++	"net/http"
++	"reflect"
++	"testing"
++
++	"github.com/go-openapi/runtime"
++	"github.com/go-openapi/strfmt"
++)
++
++type fakeResponse struct {
++	code    int
++	headers http.Header
++	body    string
++}
++
++func (r fakeResponse) Code() int                       { return r.code }
++func (r fakeResponse) Message() string                 { return http.StatusText(r.code) }
++func (r fakeResponse) GetHeader(name string) string    { return r.headers.Get(name) }
++func (r fakeResponse) GetHeaders(name string) []string { return r.headers.Values(name) }
++func (r fakeResponse) Body() io.ReadCloser             { return io.NopCloser(bytes.NewBufferString(r.body)) }
++
++// read returns the response read by a reader: errors are responses too.
++func read(t *testing.T, reader runtime.ClientResponseReader, code int, body string, headers map[string]string) any {
++	t.Helper()
++
++	h := http.Header{}
++	for k, v := range headers {
++		h.Set(k, v)
++	}
++
++	result, err := reader.ReadResponse(fakeResponse{code: code, headers: h, body: body}, runtime.JSONConsumer())
++	if err != nil {
++		if _, isResponse := err.(interface{ Code() int }); !isResponse {
++			t.Fatalf("unexpected error reading a %d response: %v", code, err)
++		}
++
++		return err
++	}
++
++	return result
++}
++
++// field digs into a response, dereferencing pointers.
++func field(t *testing.T, value any, path ...string) reflect.Value {
++	t.Helper()
++
++	v := reflect.ValueOf(value)
++	for _, name := range path {
++		for v.Kind() == reflect.Pointer || v.Kind() == reflect.Interface {
++			if v.IsNil() {
++				t.Fatalf("nil value before field %s in %T", name, value)
++			}
++			v = v.Elem()
++		}
++
++		v = v.FieldByName(name)
++		if !v.IsValid() {
++			t.Fatalf("no field %s in %T", name, value)
++		}
++	}
++
++	for v.Kind() == reflect.Pointer {
++		if v.IsNil() {
++			t.Fatalf("nil value for %v in %T", path, value)
++		}
++		v = v.Elem()
++	}
++
++	return v
++}
++
++func code(t *testing.T, response any) int {
++	t.Helper()
++
++	withCode, ok := response.(interface{ Code() int })
++	if !ok {
++		t.Fatalf("%T has no status code", response)
++	}
++
++	return withCode.Code()
++}
++
++func sameType(t *testing.T, what string, responses ...any) {
++	t.Helper()
++
++	for _, response := range responses[1:] {
++		if reflect.TypeOf(response) != reflect.TypeOf(responses[0]) {
++			t.Errorf("%s: expected the same type, but got %T and %T", what, responses[0], response)
++		}
++	}
++}
++
++func TestSharedResponsesAtRuntime(t *testing.T) {
++	formats := strfmt.Default
++
++	const forbiddenBody = ` + "`" + `{"message":"no way","details":[{"field":"name"}]}` + "`" + `
++	forbiddenHeaders := map[string]string{"X-Trace-Id": "trace-1"}
++
++	listForbidden := read(t, &ListWidgetsReader{formats: formats}, 403, forbiddenBody, forbiddenHeaders)
++	createForbidden := read(t, &CreateWidgetReader{formats: formats}, 403, forbiddenBody, forbiddenHeaders)
++	getForbidden := read(t, &GetWidgetReader{formats: formats}, 403, forbiddenBody, forbiddenHeaders)
++	sameType(t, "forbidden", listForbidden, createForbidden, getForbidden)
++
++	for _, response := range []any{listForbidden, createForbidden, getForbidden} {
++		if got := code(t, response); got != 403 {
++			t.Errorf("expected status 403, got %d", got)
++		}
++		if got := field(t, response, "Payload", "Message").String(); got != "no way" {
++			t.Errorf("unexpected message in payload: %q", got)
++		}
++		details := field(t, response, "Payload", "Details")
++		if details.Len() != 1 || field(t, details.Index(0).Interface(), "Field").String() != "name" {
++			t.Errorf("unexpected details in payload: %v", details)
++		}
++		if got := field(t, response, "XTraceID").String(); got != "trace-1" {
++			t.Errorf("unexpected trace id header: %q", got)
++		}
++	}
++
++	updateForbidden := read(t, &UpdateWidgetReader{formats: formats}, 403, ` + "`" + `{"reason":"locked"}` + "`" + `, nil)
++	if reflect.TypeOf(updateForbidden) == reflect.TypeOf(listForbidden) {
++		t.Errorf("an inline response must not use the type of a named response")
++	}
++
++	deleteUnauthorized := read(t, &DeleteWidgetReader{formats: formats}, 401, forbiddenBody, nil)
++	archiveUnauthorized := read(t, &ArchiveWidgetReader{formats: formats}, 401, forbiddenBody, nil)
++	sameType(t, "unauthorized", deleteUnauthorized, archiveUnauthorized)
++	if reflect.TypeOf(deleteUnauthorized) == reflect.TypeOf(listForbidden) {
++		t.Errorf("a named response used under different status codes needs a type for each status code")
++	}
++	if got := code(t, deleteUnauthorized); got != 401 {
++		t.Errorf("expected status 401, got %d", got)
++	}
++
++	// the default response carries the actual status code
++	const problem = ` + "`" + `{"code":7,"message":"bad gateway"}` + "`" + `
++	listUnexpected := read(t, &ListWidgetsReader{formats: formats}, 502, problem, nil)
++	createUnexpected := read(t, &CreateWidgetReader{formats: formats}, 503, problem, map[string]string{"X-Rate-Limit": "5"})
++	updateUnexpected := read(t, &UpdateWidgetReader{formats: formats}, 504, problem, nil)
++	sameType(t, "default", listUnexpected, createUnexpected, updateUnexpected)
++	if got := code(t, listUnexpected); got != 502 {
++		t.Errorf("expected status 502, got %d", got)
++	}
++	if got := code(t, createUnexpected); got != 503 {
++		t.Errorf("expected status 503, got %d", got)
++	}
++	if got := field(t, listUnexpected, "Payload", "Code").Int(); got != 7 {
++		t.Errorf("unexpected code in payload: %d", got)
++	}
++	if got := field(t, listUnexpected, "XRateLimit").Int(); got != 100 {
++		t.Errorf("expected the default value of the rate limit header, got %d", got)
++	}
++	if got := field(t, createUnexpected, "XRateLimit").Int(); got != 5 {
++		t.Errorf("unexpected rate limit header: %d", got)
++	}
++
++	getInternalError := read(t, &GetWidgetReader{formats: formats}, 500, problem, nil)
++	updateInternalError := read(t, &UpdateWidgetReader{formats: formats}, 500, problem, nil)
++	sameType(t, "internal server error", getInternalError, updateInternalError)
++	if reflect.TypeOf(getInternalError) == reflect.TypeOf(listUnexpected) {
++		t.Errorf("the default response must not share its type with a response for an explicit status code")
++	}
++
++	// a shared success response
++	const widget = ` + "`" + `{"id":"w1","name":"gear"}` + "`" + `
++	got := read(t, &GetWidgetReader{formats: formats}, 200, widget, map[string]string{"ETag": "v1"})
++	updated := read(t, &UpdateWidgetReader{formats: formats}, 200, widget, map[string]string{"ETag": "v2"})
++	sameType(t, "widget found", got, updated)
++	if name := field(t, got, "Payload", "Name").String(); name != "gear" {
++		t.Errorf("unexpected widget name: %q", name)
++	}
++	if etag := field(t, updated, "ETag").String(); etag != "v2" {
++		t.Errorf("unexpected etag: %q", etag)
++	}
++}
++`
+diff --git a/test.sh b/test.sh
+new file mode 100755
+index 00000000..1b602ac8
+--- /dev/null
++++ b/test.sh
+@@ -0,0 +1,61 @@
++#!/usr/bin/env bash
++# Run the test suites.
++#
++# Usage:
++#   ./test.sh [--output_path <junit.xml>] <base|new>
++#
++#   base  the tests of the code generator, except the ones which require network
++#         (to download a remote spec, or the dependencies of generated code).
++#   new   the tests for responses shared by several operations.
++set -uo pipefail
++
++OUTPUT_PATH="results.xml"
++MODE=""
++while [[ $# -gt 0 ]]; do
++    case "$1" in
++        --output_path)
++            OUTPUT_PATH="$2"
++            shift 2
++            ;;
++        --output_path=*)
++            OUTPUT_PATH="${1#*=}"
++            shift
++            ;;
++        base|new)
++            MODE="$1"
++            shift
++            ;;
++        *)
++            echo "Unknown argument: $1" >&2
++            echo "Usage: $0 [--output_path <junit.xml>] <base|new>" >&2
++            exit 2
++            ;;
++    esac
++done
++
++if [[ -z "$MODE" ]]; then
++    echo "Usage: $0 [--output_path <junit.xml>] <base|new>" >&2
++    exit 2
++fi
++
++case "$OUTPUT_PATH" in
++    /*) ;;
++    *) OUTPUT_PATH="$(pwd)/$OUTPUT_PATH" ;;
++esac
++
++cd "$(dirname "${BASH_SOURCE[0]}")"
++
++NEW_TESTS='TestSharedNamedResponses'
++NETWORK_TESTS='TestGenerateAndBuild|TestGenerateAndTest|TestGenClient'
++
++case "$MODE" in
++    base)
++        ARGS=(-skip "^(${NEW_TESTS}|${NETWORK_TESTS})" ./generator/...)
++        ;;
++    new)
++        ARGS=(-run "^${NEW_TESTS}" ./generator/)
++        ;;
++esac
++
++gotestsum --junitfile "$OUTPUT_PATH" --format standard-verbose -- \
++    -count=1 -timeout 45m "${ARGS[@]}"

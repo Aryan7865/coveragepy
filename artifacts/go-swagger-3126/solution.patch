@@ -1,0 +1,1962 @@
+diff --git a/docs/generate/client.md b/docs/generate/client.md
+index 05be4e32..c56cec32 100644
+--- a/docs/generate/client.md
++++ b/docs/generate/client.md
+@@ -236,6 +236,53 @@ func main() {
+ }
+ ```
+ 
++### Responses shared by several operations
++
++A response defined in the `responses` section of the spec and used (with a `$ref`) by several operations
++of the same package, under the same status code, is generated once for these operations.
++
++```yaml
++paths:
++  /pets:
++    get:
++      operationId: listPets
++      responses:
++        200:
++          description: the pets
++        403:
++          $ref: '#/responses/Forbidden'
++  /stores:
++    get:
++      operationId: listStores
++      responses:
++        200:
++          description: the stores
++        403:
++          $ref: '#/responses/Forbidden'
++responses:
++  Forbidden:
++    description: access denied
++    schema:
++      $ref: '#/definitions/Error'
++```
++
++Both operations return a `*operations.Forbidden` error for a 403 response, so a single piece of code handles it:
++
++```go
++var forbidden *operations.Forbidden
++if errors.As(err, &forbidden) {
++  log.Printf("access denied: %s", forbidden.Payload.Message)
++}
++```
++
++The type is named after the response (or its `x-go-name` extension). When the same named response is shared under
++several status codes, there is a type for each status code, named after the response and the status (e.g. `ForbiddenUnauthorized`).
++Should that name conflict with another type declared in the package, it gets a `Response` suffix.
++
++Responses are shared within a package only: with tags, operations in different packages each get their own type.
++A named response used by a single operation of a package, as well as inline responses, keep an operation-specific type
++(e.g. `ListPetsForbidden`).
++
+ ### Authentication
+ 
+ The client supports 3 authentication schemes:
+diff --git a/docs/generate/server.md b/docs/generate/server.md
+index 1b998dcf..c147bc09 100644
+--- a/docs/generate/server.md
++++ b/docs/generate/server.md
+@@ -481,6 +481,15 @@ todos.AddOneHandlerFunc(func(params todos.AddOneParams, principal interface{}) m
+ })
+ ```
+ 
++### Responses shared by several operations
++
++A response defined in the `responses` section of the spec and used (with a `$ref`) by several operations
++of the same package, under the same status code, is generated once for these operations, in a file of its own.
++Handlers of these operations respond with the same type (e.g. `operations.NewForbidden()`).
++See [client generation](../client/#responses-shared-by-several-operations) for details.
++
++With `--strict-responders`, a shared response implements the responder interface of each operation using it.
++
+ ### API Documentation (ReDoc/SwaggerUI)
+ 
+ Every generated server includes built-in API documentation powered by ReDoc by default. This provides an interactive API browser that allows you to explore and test your API endpoints directly from the browser.
+diff --git a/docs/reference/templates/template_layout.md b/docs/reference/templates/template_layout.md
+index e1307db4..08ba5e87 100644
+--- a/docs/reference/templates/template_layout.md
++++ b/docs/reference/templates/template_layout.md
+@@ -84,6 +84,11 @@ layout:
+       target: "{{ if gt (len .Tags) 0 }}{{ joinFilePath .Target .ServerPackage .APIPackage .Package  }}{{ else }}{{ joinFilePath .Target .ServerPackage .Package  }}{{ end }}"
+       file_name: "{{ (snakize (pascalize .Name)) }}.go"
+   operation_groups:
++  shared_responses:
++    - name: sharedresponse
++      source: asset:serverSharedresponse
++      target: "{{ if .UseTags }}{{ joinFilePath .Target .ServerPackage .APIPackage .Package  }}{{ else }}{{ joinFilePath .Target .ServerPackage .Package  }}{{ end }}"
++      file_name: "{{ (snakize (pascalize .Name)) }}_responses.go"
+ 
+ ```
+ 
+@@ -121,4 +126,15 @@ layout:
+       source: asset:clientClient
+       target: "{{ joinFilePath .Target .ClientPackage .Name }}"
+       file_name: "{{ (snakize (pascalize .Name)) }}_client.go"
++  shared_responses:
++    - name: sharedresponse
++      source: asset:clientSharedresponse
++      target: "{{ joinFilePath .Target .ClientPackage .Package }}"
++      file_name: "{{ (snakize (pascalize .Name)) }}_responses.go"
+ ```
++
++The `shared_responses` section renders the responses shared by several operations of a package
++(see [client generation](../../../generate/client/#responses-shared-by-several-operations)).
++Templates in this section receive a `GenSharedResponse`, with the shared response in `.Response`.
++The `serverresponse` and `clientresponse` templates render the declaration of a response,
++and skip responses with `.IsShared` in the files of operations.
+diff --git a/generator/client.go b/generator/client.go
+index 4a618ecc..942ee0eb 100644
+--- a/generator/client.go
++++ b/generator/client.go
+@@ -17,7 +17,8 @@ func GenerateClient(name string, modelNames, operationIDs []string, opts *GenOpt
+ 		return err
+ 	}
+ 
+-	specDoc, analyzed, err := newSpecAnalyzer(opts).analyzeSpec()
++	analyzer := newSpecAnalyzer(opts)
++	specDoc, analyzed, err := analyzer.analyzeSpec()
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -58,6 +59,8 @@ func GenerateClient(name string, modelNames, operationIDs []string, opts *GenOpt
+ 		DefaultProduces:   opts.DefaultProduces,
+ 		DefaultConsumes:   opts.DefaultConsumes,
+ 		GenOpts:           opts,
++		AllOperations:     gatherOperations(opts, analyzed, nil),
++		NamedResponses:    analyzer.namedResponses,
+ 		mangler:           mangler,
+ 		mediaMime:         mediaMime,
+ 	}
+@@ -130,6 +133,12 @@ func (c *clientGenerator) Generate() error {
+ 					return err
+ 				}
+ 			}
++			for _, sr := range opg.SharedResponses {
++				shared := sr
++				if err := newRenderer(c.GenOpts).renderSharedResponse(&shared); err != nil {
++					return err
++				}
++			}
+ 			if err := newRenderer(c.GenOpts).renderOperationGroup(&opg); err != nil {
+ 				return err
+ 			}
+diff --git a/generator/operation.go b/generator/operation.go
+index 67f5b7a5..0b83a2d4 100644
+--- a/generator/operation.go
++++ b/generator/operation.go
+@@ -18,7 +18,6 @@ import (
+ 
+ 	"github.com/go-openapi/analysis"
+ 	"github.com/go-openapi/loads"
+-	"github.com/go-openapi/runtime"
+ 	"github.com/go-openapi/spec"
+ 	"github.com/go-openapi/swag/jsonutils"
+ 	"github.com/go-openapi/swag/stringutils"
+@@ -57,7 +56,8 @@ func GenerateServerOperation(operationNames []string, opts *GenOpts) error {
+ 		return err
+ 	}
+ 
+-	specDoc, analyzed, err := newSpecAnalyzer(opts).analyzeSpec()
++	analyzer := newSpecAnalyzer(opts)
++	specDoc, analyzed, err := analyzer.analyzeSpec()
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -68,7 +68,26 @@ func GenerateServerOperation(operationNames []string, opts *GenOpts) error {
+ 		return errors.New("no operations were selected")
+ 	}
+ 
+-	for operationName, opRef := range ops {
++	// responses shared with other operations are decided from the whole spec,
++	// so an operation generated on its own is the same as when generating the full server.
++	planner, err := serverAppGenerator(
++		appNameOrDefault(opts.LanguageOpts, specDoc, opts.Name, defaultServerName),
++		specDoc, analyzed, nil, gatherOperations(opts, analyzed, nil), analyzer.namedResponses, opts,
++	)
++	if err != nil {
++		return err
++	}
++	sharedResponses, err := planner.planSharedResponses()
++	if err != nil {
++		return err
++	}
++	renderedSharedResponses := make(map[string]bool)
++	builtSharedResponses := make(map[*sharedResponse]sharedDeclaration)
++
++	// operations are generated in a stable order: the declaration of a shared response is rendered with the first
++	// operation using it
++	for _, operationName := range slices.Sorted(maps.Keys(ops)) {
++		opRef := ops[operationName]
+ 		method, path, operation := opRef.Method, opRef.Path, opRef.Op
+ 
+ 		serverPackage := opts.LanguageOpts.ManglePackagePath(opts.ServerPackage, defaultServerTarget)
+@@ -99,6 +118,10 @@ func GenerateServerOperation(operationNames []string, opts *GenOpts) error {
+ 			Doc:                  specDoc,
+ 			Analyzed:             analyzed,
+ 			GenOpts:              opts,
++
++			SharedResponses:         sharedResponses,
++			renderedSharedResponses: renderedSharedResponses,
++			builtSharedResponses:    builtSharedResponses,
+ 		}
+ 		if err := generator.Generate(); err != nil {
+ 			return err
+@@ -136,6 +159,10 @@ type operationGenerator struct {
+ 	Doc                  *loads.Document
+ 	Analyzed             *analysis.Spec
+ 	GenOpts              *GenOpts
++
++	SharedResponses         *sharedResponsePlan
++	renderedSharedResponses map[string]bool // shared responses already rendered, by name in their package
++	builtSharedResponses    map[*sharedResponse]sharedDeclaration
+ }
+ 
+ // Generate a single operation.
+@@ -173,6 +200,8 @@ func (o *operationGenerator) Generate() error {
+ 	}
+ 
+ 	_, tags, _ := bldr.analyzeTags()
++	bldr.SharedResponses = o.SharedResponses.forOperation(o.Name)
++	bldr.builtSharedResponses = o.builtSharedResponses
+ 
+ 	op, err := bldr.MakeOperation()
+ 	if err != nil {
+@@ -199,6 +228,24 @@ func (o *operationGenerator) Generate() error {
+ 		if err := newRenderer(o.GenOpts).renderOperation(&op); err != nil {
+ 			return err
+ 		}
++
++		declared := make(sharedResponseDeclarations)
++		declared.collect(&bldr, op)
++
++		for _, sr := range declared.forOperations(GenOperations{op}, imports, defaultImports) {
++			shared := sr
++			key := operationPackageKey(shared.Package, shared.UseTags) + "#" + shared.Name
++			if o.renderedSharedResponses[key] {
++				continue
++			}
++
++			if err := newRenderer(o.GenOpts).renderSharedResponse(&shared); err != nil {
++				return err
++			}
++			if o.renderedSharedResponses != nil {
++				o.renderedSharedResponses[key] = true
++			}
++		}
+ 	}
+ 
+ 	return nil
+@@ -231,6 +278,13 @@ type codeGenOpBuilder struct {
+ 	SecurityDefinitions map[string]spec.SecurityScheme
+ 	ExtraSchemas        map[string]GenSchema
+ 	GenOpts             *GenOpts
++
++	// SharedResponses are the responses this operation shares with other operations, by status code
++	SharedResponses map[int]*sharedResponse
++	// declarations of the shared responses, as made with this operation
++	sharedDeclarations map[int]sharedDeclaration
++	// shared responses already built for other operations
++	builtSharedResponses map[*sharedResponse]sharedDeclaration
+ }
+ 
+ //nolint:gocognit,gocyclo,cyclop,maintidx // TODO(fredbi): refactor
+@@ -322,23 +376,35 @@ func (b *codeGenOpBuilder) MakeOperation() (GenOperation, error) {
+ 	var defaultResponse *GenResponse
+ 	var successResponses []GenResponse
+ 	if operation.Responses != nil {
++		responseNames := make(map[string]bool, len(srs))
+ 		for _, v := range srs {
+ 			name, ok := v.Response.Extensions.GetString(xGoName)
+ 			if !ok {
+ 				// look for name of well-known codes
+-				name = runtime.Statuses[v.Code]
+-				if name == "" {
+-					// non-standard codes deserve some name
+-					name = fmt.Sprintf("Status %d", v.Code)
+-				}
++				name = statusName(v.Code)
+ 			}
+ 			name = mangler.ToJSONName(b.Name + " " + name)
++			if responseNames[name] {
++				// the same x-go-name is used for several status codes (e.g. from a named response)
++				name = mangler.ToJSONName(name + " " + statusName(v.Code))
++			}
++			responseNames[name] = true
++
+ 			const (
+ 				httpStatusCodeDivider = 100
+ 				httpStatusCodeSuccess = 2
+ 			)
+ 			isSuccess := v.Code/httpStatusCodeDivider == httpStatusCodeSuccess
+-			gr, err := b.MakeResponse(receiver, name, isSuccess, resolver, v.Code, v.Response)
++
++			var (
++				gr  GenResponse
++				err error
++			)
++			if shared := b.sharedResponse(v.Code); shared != nil {
++				gr, err = b.makeSharedResponse(receiver, resolver, shared, isSuccess, v.Code, v.Response)
++			} else {
++				gr, err = b.MakeResponse(receiver, name, isSuccess, resolver, v.Code, v.Response)
++			}
+ 			if err != nil {
+ 				return GenOperation{}, err
+ 			}
+@@ -349,7 +415,15 @@ func (b *codeGenOpBuilder) MakeOperation() (GenOperation, error) {
+ 		}
+ 
+ 		if operation.Responses.Default != nil {
+-			gr, err := b.MakeResponse(receiver, b.Name+" default", false, resolver, -1, *operation.Responses.Default)
++			var (
++				gr  GenResponse
++				err error
++			)
++			if shared := b.sharedResponse(defaultResponseCode); shared != nil {
++				gr, err = b.makeSharedResponse(receiver, resolver, shared, false, defaultResponseCode, *operation.Responses.Default)
++			} else {
++				gr, err = b.MakeResponse(receiver, b.Name+" default", false, resolver, defaultResponseCode, *operation.Responses.Default)
++			}
+ 			if err != nil {
+ 				return GenOperation{}, err
+ 			}
+diff --git a/generator/renderer.go b/generator/renderer.go
+index 71bcbeca..0ed66de7 100644
+--- a/generator/renderer.go
++++ b/generator/renderer.go
+@@ -304,6 +304,21 @@ func (g *renderer) renderOperation(gg *GenOperation) error {
+ 	return nil
+ }
+ 
++func (g *renderer) renderSharedResponse(gg *GenSharedResponse) error {
++	log.Printf("rendering %d templates for shared response %s", len(g.Sections.SharedResponses), gg.Name)
++	for _, tp := range g.Sections.SharedResponses {
++		templ := tp
++		if !g.shouldRenderOperations() {
++			continue
++		}
++
++		if err := g.write(&templ, gg); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
+ func (g *renderer) renderDefinition(gg *GenDefinition) error {
+ 	log.Printf("rendering %d templates for model %s", len(g.Sections.Models), gg.Name)
+ 	for _, tp := range g.Sections.Models {
+diff --git a/generator/response_sharing.go b/generator/response_sharing.go
+new file mode 100644
+index 00000000..ffccdf4a
+--- /dev/null
++++ b/generator/response_sharing.go
+@@ -0,0 +1,885 @@
++// SPDX-FileCopyrightText: Copyright 2015-2025 go-swagger maintainers
++// SPDX-License-Identifier: Apache-2.0
++
++package generator
++
++import (
++	"encoding/json"
++	"fmt"
++	"go/ast"
++	"go/parser"
++	"go/token"
++	"log"
++	"net/http"
++	"net/url"
++	"os"
++	"path/filepath"
++	"slices"
++	"strconv"
++	"strings"
++
++	"github.com/go-openapi/loads"
++	"github.com/go-openapi/runtime"
++	"github.com/go-openapi/spec"
++)
++
++// Sharing responses between operations
++//
++// A response declared in the "responses" section of a spec and referenced (with a $ref) by several
++// operations is rendered as a single type, which is declared once in each package that holds some of these
++// operations.
++//
++// Operations share a type for a response only when they are generated in the same package and use this
++// response under the same status code (the default response counts as its own status code): types for responses
++// carry their status code. A response referenced by a single operation of a package keeps its usual
++// operation-specific type.
++//
++// The declaration of a shared response is rendered in a file of its own, from the "shared_responses" section of
++// the layout. Its content doesn't depend on which operations are selected for generation: generating a subset of
++// the operations (or a single operation) produces the same declaration as a full generation.
++
++const (
++	defaultResponseCode = -1
++
++	// maxSharedResponseCandidates bounds the attempts to find a free name for a shared response.
++	maxSharedResponseCandidates = 100
++)
++
++// namedResponse identifies a response from the "responses" section of a spec document.
++type namedResponse struct {
++	// ID is the canonical location of the response, e.g. file:///api/spec.yaml#/responses/NotFound.
++	ID string
++	// Key is the key of the response in the "responses" section.
++	Key string
++}
++
++// responseSlot locates a response of an operation: the default response has code -1.
++type responseSlot struct {
++	Method string
++	Path   string
++	Code   int
++}
++
++// namedResponses tells which named response (if any) was referenced by an operation
++// for a given status code, before the spec was flattened.
++type namedResponses map[responseSlot]namedResponse
++
++// collectNamedResponses finds all responses of operations that refer to a named response.
++//
++// This must run before flattening the spec, as flattening expands responses and the reference to a named response is
++// lost after that.
++func collectNamedResponses(doc *loads.Document, loader loads.DocLoader) namedResponses {
++	swspec := doc.Spec()
++	if swspec == nil || swspec.Paths == nil {
++		return nil
++	}
++
++	root := documentURL(doc.SpecFilePath())
++	found := make(namedResponses)
++
++	for path, pathItem := range swspec.Paths.Paths {
++		item, base := pathItem, root
++
++		if pathItem.Ref.String() != "" {
++			// the path item is defined elsewhere: $ref's in there are relative to the document holding it
++			resolved, err := spec.ResolvePathItemWithBase(swspec, pathItem.Ref, &spec.ExpandOptions{
++				RelativeBase:          doc.SpecFilePath(),
++				PathLoaderWithOptions: loader,
++			})
++			if err != nil {
++				// this is reported when flattening the spec
++				continue
++			}
++
++			item = *resolved
++			base = resolveURL(root, pathItem.Ref.GetURL())
++			base.Fragment = ""
++		}
++
++		for method, operation := range pathItemOperations(item) {
++			if operation == nil || operation.Responses == nil {
++				continue
++			}
++
++			if response := operation.Responses.Default; response != nil {
++				found.add(responseSlot{Method: method, Path: path, Code: defaultResponseCode}, base, response.Ref)
++			}
++
++			for code, response := range operation.Responses.StatusCodeResponses {
++				found.add(responseSlot{Method: method, Path: path, Code: code}, base, response.Ref)
++			}
++		}
++	}
++
++	return found
++}
++
++func (n namedResponses) add(slot responseSlot, base *url.URL, ref spec.Ref) {
++	if ref.String() == "" {
++		return
++	}
++
++	target := resolveURL(base, ref.GetURL())
++	key, ok := responseKeyFromFragment(target.Fragment)
++	if !ok {
++		// not a named response, e.g. a JSON pointer to the response of another operation
++		return
++	}
++
++	n[slot] = namedResponse{
++		ID:  target.String(),
++		Key: key,
++	}
++}
++
++// mayBeShared tells if some named response is referred to more than once under the same status code.
++func (n namedResponses) mayBeShared() bool {
++	type use struct {
++		id   string
++		code int
++	}
++	seen := make(map[use]bool, len(n))
++
++	for slot, named := range n {
++		key := use{id: named.ID, code: slot.Code}
++		if seen[key] {
++			return true
++		}
++		seen[key] = true
++	}
++
++	return false
++}
++
++func (n namedResponses) lookup(method, path string, code int) (namedResponse, bool) {
++	named, ok := n[responseSlot{Method: strings.ToUpper(method), Path: path, Code: code}]
++
++	return named, ok
++}
++
++// responseKeyFromFragment recognizes JSON pointers such as "/responses/NotFound".
++func responseKeyFromFragment(fragment string) (string, bool) {
++	const responsesSection = "/responses/"
++
++	key, ok := strings.CutPrefix(fragment, responsesSection)
++	if !ok || key == "" || strings.Contains(key, "/") {
++		return "", false
++	}
++
++	// unescape the JSON pointer token
++	key = strings.ReplaceAll(key, "~1", "/")
++	key = strings.ReplaceAll(key, "~0", "~")
++
++	return key, true
++}
++
++func pathItemOperations(item spec.PathItem) map[string]*spec.Operation {
++	return map[string]*spec.Operation{
++		http.MethodGet:     item.Get,
++		http.MethodPut:     item.Put,
++		http.MethodPost:    item.Post,
++		http.MethodDelete:  item.Delete,
++		http.MethodOptions: item.Options,
++		http.MethodHead:    item.Head,
++		http.MethodPatch:   item.Patch,
++	}
++}
++
++// documentURL builds an absolute URL for the location of a spec document.
++func documentURL(location string) *url.URL {
++	const minSchemeLength = 2 // tells apart URLs from windows paths such as C:\spec.yaml
++
++	if u, err := url.Parse(location); err == nil && u.IsAbs() && len(u.Scheme) >= minSchemeLength && u.Scheme != "file" {
++		return u
++	}
++
++	location = strings.TrimPrefix(location, "file://")
++	if abs, err := filepath.Abs(location); err == nil {
++		location = abs
++	}
++
++	return &url.URL{Scheme: "file", Path: filepath.ToSlash(location)}
++}
++
++func resolveURL(base, ref *url.URL) *url.URL {
++	if ref == nil {
++		u := *base
++
++		return &u
++	}
++
++	return base.ResolveReference(ref)
++}
++
++// sharedResponseKey identifies a response shared by several operations in a package.
++type sharedResponseKey struct {
++	Package string // the package holding the operations, see [operationPackageKey]
++	ID      string // the named response, see [namedResponse]
++	Code    int    // the status code of the response (-1 for the default response)
++}
++
++// sharedResponse is a response shared by several operations in a package.
++type sharedResponse struct {
++	Key        sharedResponseKey
++	Name       string   // the name for the shared type
++	Operations []string // sorted names of the operations using this response
++}
++
++// sharedResponsePlan tells which responses are shared by which operations, and how they are named.
++type sharedResponsePlan struct {
++	byOperation map[string]map[int]*sharedResponse
++}
++
++func (p *sharedResponsePlan) isEmpty() bool {
++	return p == nil || len(p.byOperation) == 0
++}
++
++// forOperation returns the shared responses of an operation, indexed by status code.
++func (p *sharedResponsePlan) forOperation(name string) map[int]*sharedResponse {
++	if p == nil {
++		return nil
++	}
++
++	return p.byOperation[name]
++}
++
++// sharedResponseDeclarations collects the declarations of shared responses, as operations are built.
++//
++// A shared response is built once, with the first operation using it (see [codeGenOpBuilder.makeSharedResponse]).
++type sharedResponseDeclarations map[*sharedResponse]GenSharedResponse
++
++func (d sharedResponseDeclarations) collect(b *codeGenOpBuilder, operation GenOperation) {
++	for code, declared := range b.sharedDeclarations {
++		shared := b.SharedResponses[code]
++		if _, ok := d[shared]; ok {
++			continue
++		}
++
++		d[shared] = newGenSharedResponse(b.GenOpts, operation, shared, declared)
++	}
++}
++
++// forOperations returns the declarations of the shared responses used by the given operations.
++func (d sharedResponseDeclarations) forOperations(operations GenOperations, imports, defaultImports map[string]string) []GenSharedResponse {
++	if len(d) == 0 {
++		return nil
++	}
++
++	seen := make(map[*sharedResponse]bool)
++	var declarations []GenSharedResponse
++
++	for _, operation := range operations {
++		for shared, declaration := range d {
++			if seen[shared] || !slices.Contains(shared.Operations, operation.Name) {
++				continue
++			}
++			seen[shared] = true
++
++			declaration.Imports = imports
++			declaration.DefaultImports = defaultImports
++			declarations = append(declarations, declaration)
++		}
++	}
++
++	slices.SortFunc(declarations, func(a, b GenSharedResponse) int { return strings.Compare(a.Name, b.Name) })
++
++	return declarations
++}
++
++// sharedDeclaration is what it takes to declare a shared response, as built by an operation.
++type sharedDeclaration struct {
++	Response     GenResponse
++	ExtraSchemas GenSchemaList
++}
++
++func newGenSharedResponse(opts *GenOpts, operation GenOperation, shared *sharedResponse, declared sharedDeclaration) GenSharedResponse {
++	return GenSharedResponse{
++		GenCommon: GenCommon{
++			Copyright:        opts.Copyright,
++			TargetImportPath: opts.LanguageOpts.BaseImport(opts.Target),
++		},
++		Package:          operation.Package,
++		Name:             shared.Name,
++		UseTags:          operation.UseTags,
++		Operations:       shared.Operations,
++		Response:         declared.Response,
++		ExtraSchemas:     declared.ExtraSchemas,
++		DefaultImports:   operation.DefaultImports,
++		Imports:          operation.Imports,
++		StrictResponders: opts.StrictResponders,
++	}
++}
++
++// operationPackageKey identifies the package where an operation is generated.
++func operationPackageKey(pkg string, useTags bool) string {
++	return strconv.FormatBool(useTags) + ":" + pkg
++}
++
++// sharedResponsePlanner decides which responses are shared by several operations of the same package,
++// and finds a name for the types of these responses that doesn't conflict with anything else declared in the package.
++type sharedResponsePlanner struct {
++	opts       *GenOpts
++	named      namedResponses
++	app        *GenApp                     // the app built as if no response were shared
++	builders   map[string]codeGenOpBuilder // the builders for all operations in app, before they made the operation
++	operations map[string]opRef            // the operations, not altered by building the app
++
++	located map[string][]locatedTemplate // templates rendered in each target directory
++	scanned map[string]*packageScan      // declarations found in each target directory
++}
++
++// packageScan collects the names declared at the top level of a package, and its file names.
++type packageScan struct {
++	identifiers map[string]bool
++	files       map[string]bool
++}
++
++func (s *packageScan) conflictsWith(other *packageScan) bool {
++	for identifier := range other.identifiers {
++		if s.identifiers[identifier] {
++			return true
++		}
++	}
++
++	for file := range other.files {
++		if s.files[file] {
++			return true
++		}
++	}
++
++	return false
++}
++
++func (s *packageScan) merge(other *packageScan) {
++	for identifier := range other.identifiers {
++		s.identifiers[identifier] = true
++	}
++
++	for file := range other.files {
++		s.files[file] = true
++	}
++}
++
++func newPackageScan() *packageScan {
++	return &packageScan{
++		identifiers: make(map[string]bool),
++		files:       make(map[string]bool),
++	}
++}
++
++type sharedResponseGroup struct {
++	key        sharedResponseKey
++	named      namedResponse
++	operations []string
++	goName     string // x-go-name set on the named response, if any
++}
++
++func (p *sharedResponsePlanner) plan() (*sharedResponsePlan, error) {
++	groups := p.groups()
++	if len(groups) == 0 {
++		return nil, nil //nolint:nilnil // no shared response is not an error
++	}
++
++	plan := &sharedResponsePlan{byOperation: make(map[string]map[int]*sharedResponse)}
++
++	// named responses shared under several status codes in the same package get one type per status code
++	codesInPackage := make(map[string]int)
++	for _, group := range groups {
++		codesInPackage[group.key.Package+"#"+group.key.ID]++
++	}
++
++	claimed := make(map[string]*packageScan) // names already given to shared responses, by target directory
++	for _, group := range groups {
++		shared, err := p.nameSharedResponse(group, codesInPackage[group.key.Package+"#"+group.key.ID] > 1, claimed)
++		if err != nil {
++			return nil, err
++		}
++
++		for _, operation := range shared.Operations {
++			if plan.byOperation[operation] == nil {
++				plan.byOperation[operation] = make(map[int]*sharedResponse)
++			}
++			plan.byOperation[operation][shared.Key.Code] = shared
++		}
++	}
++
++	return plan, nil
++}
++
++// groups finds the named responses used by at least two operations of the same package, under the same status code.
++func (p *sharedResponsePlanner) groups() []sharedResponseGroup {
++	index := make(map[sharedResponseKey]*sharedResponseGroup)
++
++	for _, operation := range p.app.Operations {
++		pkg := operationPackageKey(operation.Package, operation.UseTags)
++
++		responses := make([]GenResponse, 0, len(operation.Responses)+1)
++		responses = append(responses, operation.Responses...)
++		if operation.DefaultResponse != nil {
++			responses = append(responses, *operation.DefaultResponse)
++		}
++
++		for _, response := range responses {
++			named, ok := p.named.lookup(operation.Method, operation.Path, response.Code)
++			if !ok {
++				continue
++			}
++
++			key := sharedResponseKey{Package: pkg, ID: named.ID, Code: response.Code}
++			group, found := index[key]
++			if !found {
++				goName, _ := spec.Extensions(response.Extensions).GetString(xGoName)
++				group = &sharedResponseGroup{key: key, named: named, goName: goName}
++				index[key] = group
++			}
++
++			group.operations = append(group.operations, operation.Name)
++		}
++	}
++
++	groups := make([]sharedResponseGroup, 0, len(index))
++	for _, group := range index {
++		if len(group.operations) < 2 { //nolint:mnd // sharing requires two operations at least
++			continue
++		}
++
++		slices.Sort(group.operations)
++		groups = append(groups, *group)
++	}
++
++	// names are attributed in a stable order
++	slices.SortFunc(groups, func(a, b sharedResponseGroup) int {
++		if c := strings.Compare(a.key.Package, b.key.Package); c != 0 {
++			return c
++		}
++		if c := strings.Compare(a.key.ID, b.key.ID); c != 0 {
++			return c
++		}
++
++		return compareStatusCodes(a.key.Code, b.key.Code)
++	})
++
++	return groups
++}
++
++// compareStatusCodes sorts status codes, with the default response last.
++func compareStatusCodes(a, b int) int {
++	switch {
++	case a == b:
++		return 0
++	case a == defaultResponseCode:
++		return 1
++	case b == defaultResponseCode:
++		return -1
++	default:
++		return a - b
++	}
++}
++
++// baseName is the name of a shared response, before any conflict is resolved.
++//
++// It is the name of the response in the spec (or its x-go-name), qualified by the status code whenever the same
++// named response is shared under several status codes in the package.
++func (g sharedResponseGroup) baseName(qualifyWithCode bool) string {
++	name := g.named.Key
++	if g.goName != "" {
++		name = g.goName
++	}
++
++	if !qualifyWithCode {
++		return name
++	}
++
++	if g.key.Code == defaultResponseCode {
++		return name + " default"
++	}
++
++	return name + " " + statusName(g.key.Code)
++}
++
++// statusName is the name used for a status code when naming the type of a response.
++func statusName(code int) string {
++	if name := runtime.Statuses[code]; name != "" {
++		return name
++	}
++
++	// non-standard codes deserve some name
++	return fmt.Sprintf("Status %d", code)
++}
++
++// nameSharedResponse picks a name for the type of a shared response, which doesn't conflict with any other
++// declaration in the target package (or its files).
++func (p *sharedResponsePlanner) nameSharedResponse(group sharedResponseGroup, qualifyWithCode bool, claimed map[string]*packageScan) (*sharedResponse, error) {
++	mangler := p.opts.LanguageOpts.Mangler
++	base := group.baseName(qualifyWithCode)
++	representative := group.operations[0]
++
++	for attempt := range maxSharedResponseCandidates {
++		candidate := base
++		switch attempt {
++		case 0:
++		case 1:
++			candidate += " response"
++		default:
++			candidate += " response " + strconv.Itoa(attempt)
++		}
++
++		shared := &sharedResponse{
++			Key:        group.key,
++			Name:       mangler.ToJSONName(candidate),
++			Operations: group.operations,
++		}
++
++		declaration, err := p.declare(representative, shared)
++		if err != nil {
++			return nil, err
++		}
++
++		rendered, err := p.renderDeclaration(&declaration)
++		if err != nil {
++			return nil, err
++		}
++
++		conflict := false
++		for dir, scan := range rendered {
++			existing, err := p.scan(dir)
++			if err != nil {
++				return nil, err
++			}
++
++			if existing.conflictsWith(scan) || claimed[dir] != nil && claimed[dir].conflictsWith(scan) {
++				conflict = true
++
++				break
++			}
++		}
++
++		if conflict {
++			debugLogf("name %q for shared response %s conflicts with another declaration", shared.Name, group.named.ID)
++
++			continue
++		}
++
++		for dir, scan := range rendered {
++			if claimed[dir] == nil {
++				claimed[dir] = newPackageScan()
++			}
++			claimed[dir].merge(scan)
++		}
++
++		return shared, nil
++	}
++
++	return nil, fmt.Errorf("could not find a name for the response %s shared by operations %v", group.named.ID, group.operations)
++}
++
++// declare builds the declaration of a shared response, from one of the operations using it.
++func (p *sharedResponsePlanner) declare(operationName string, shared *sharedResponse) (GenSharedResponse, error) {
++	bldr, ok := p.builders[operationName]
++	opRef, found := p.operations[operationName]
++	if !ok || !found {
++		return GenSharedResponse{}, fmt.Errorf("internal error: operation %q not found", operationName)
++	}
++
++	var operation GenOperation
++	for _, op := range p.app.Operations {
++		if op.Name == operationName {
++			operation = op
++
++			break
++		}
++	}
++
++	// building a response alters its schema: work with a copy of the response, as it is in the spec
++	response, err := cloneResponse(opRef.Op, shared.Key.Code)
++	if err != nil {
++		return GenSharedResponse{}, err
++	}
++
++	bldr.ExtraSchemas = nil
++	bldr.sharedDeclarations = nil
++	bldr.builtSharedResponses = nil
++	resolver := newTypeResolver(
++		bldr.GenOpts.LanguageOpts.ManglePackageName(bldr.ModelsPackage, defaultModelsTarget),
++		bldr.Doc,
++		bldr.GenOpts,
++	)
++
++	if _, err := bldr.makeSharedResponse("o", resolver, shared, isSuccessCode(shared.Key.Code), shared.Key.Code, response); err != nil {
++		return GenSharedResponse{}, err
++	}
++
++	return newGenSharedResponse(p.opts, operation, shared, bldr.sharedDeclarations[shared.Key.Code]), nil
++}
++
++func cloneResponse(operation *spec.Operation, code int) (spec.Response, error) {
++	var response spec.Response
++	if operation == nil || operation.Responses == nil {
++		return response, nil
++	}
++
++	var source *spec.Response
++	if code == defaultResponseCode {
++		source = operation.Responses.Default
++	} else if r, ok := operation.Responses.StatusCodeResponses[code]; ok {
++		source = &r
++	}
++	if source == nil {
++		return response, nil
++	}
++
++	raw, err := json.Marshal(source)
++	if err != nil {
++		return response, err
++	}
++
++	err = json.Unmarshal(raw, &response)
++
++	return response, err
++}
++
++func isSuccessCode(code int) bool {
++	const (
++		httpStatusCodeDivider = 100
++		httpStatusCodeSuccess = 2
++	)
++
++	return code != defaultResponseCode && code/httpStatusCodeDivider == httpStatusCodeSuccess
++}
++
++// renderDeclaration renders (without writing) the declaration of a shared response and tells what it declares,
++// in which target directory.
++func (p *sharedResponsePlanner) renderDeclaration(declaration *GenSharedResponse) (map[string]*packageScan, error) {
++	r := newRenderer(p.opts)
++	scans := make(map[string]*packageScan)
++
++	for _, tp := range p.opts.Sections.SharedResponses {
++		templ := tp
++		dir, file, err := r.location(&templ, declaration)
++		if err != nil {
++			return nil, err
++		}
++
++		content, err := r.render(&templ, declaration)
++		if err != nil {
++			return nil, err
++		}
++
++		if scans[dir] == nil {
++			scans[dir] = newPackageScan()
++		}
++		scans[dir].files[file] = true
++		if err := collectDeclarations(file, content, scans[dir].identifiers); err != nil {
++			return nil, fmt.Errorf("rendering shared response %s: %w", declaration.Name, err)
++		}
++	}
++
++	return scans, nil
++}
++
++// scan collects the top-level declarations and file names of all generated sources in a target directory.
++//
++// The declarations for shared responses are not known yet: operations are rendered as if no response were
++// shared, so the declarations of their own responses are also collected.
++func (p *sharedResponsePlanner) scan(dir string) (*packageScan, error) {
++	if scan, ok := p.scanned[dir]; ok {
++		return scan, nil
++	}
++
++	if err := p.locateTemplates(); err != nil {
++		return nil, err
++	}
++
++	r := newRenderer(p.opts)
++	scan := newPackageScan()
++
++	for _, located := range p.located[dir] {
++		templ := located.template
++		scan.files[located.file] = true
++
++		var (
++			content []byte
++			err     error
++		)
++		if templ.SkipExists && fileExists(dir, located.file) {
++			content, err = os.ReadFile(filepath.Join(dir, located.file))
++		} else {
++			content, err = r.render(&templ, located.data)
++		}
++		if err != nil {
++			return nil, err
++		}
++
++		if err := collectDeclarations(located.file, content, scan.identifiers); err != nil {
++			// not go source, or broken: this will be reported when formatting generated code
++			log.Printf("could not parse declarations for %s: %v", located.file, err)
++		}
++	}
++
++	p.scanned[dir] = scan
++
++	return scan, nil
++}
++
++// locatedTemplate is a template to render with some data, in a target directory.
++type locatedTemplate struct {
++	template TemplateOpts
++	data     any
++	file     string
++}
++
++// locateTemplates finds out where the templates of operations, operation groups and of the application are rendered.
++func (p *sharedResponsePlanner) locateTemplates() error {
++	if p.located != nil {
++		return nil
++	}
++
++	r := newRenderer(p.opts)
++	p.located = make(map[string][]locatedTemplate)
++
++	locate := func(templates []TemplateOpts, data any) error {
++		for _, tp := range templates {
++			templ := tp
++			dir, file, err := r.location(&templ, data)
++			if err != nil {
++				return err
++			}
++
++			p.located[dir] = append(p.located[dir], locatedTemplate{template: templ, data: data, file: file})
++		}
++
++		return nil
++	}
++
++	for i := range p.app.Operations {
++		if err := locate(p.opts.Sections.Operations, &p.app.Operations[i]); err != nil {
++			return err
++		}
++	}
++
++	for i := range p.app.OperationGroups {
++		if err := locate(p.opts.Sections.OperationGroups, &p.app.OperationGroups[i]); err != nil {
++			return err
++		}
++	}
++
++	var application []TemplateOpts
++	for _, tp := range p.opts.Sections.Application {
++		templ := tp
++		if r.shouldRenderApp(&templ, p.app) {
++			application = append(application, templ)
++		}
++	}
++
++	return locate(application, p.app)
++}
++
++// collectDeclarations adds to identifiers the names declared at the top level of a go source.
++func collectDeclarations(file string, content []byte, identifiers map[string]bool) error {
++	if !strings.EqualFold(filepath.Ext(file), ".go") {
++		return nil
++	}
++
++	src, err := parser.ParseFile(token.NewFileSet(), file, content, parser.SkipObjectResolution)
++	if err != nil {
++		return err
++	}
++
++	add := func(name *ast.Ident) {
++		if name.Name != "_" {
++			identifiers[name.Name] = true
++		}
++	}
++
++	for _, decl := range src.Decls {
++		switch d := decl.(type) {
++		case *ast.FuncDecl:
++			if d.Recv == nil && d.Name.Name != "init" {
++				add(d.Name)
++			}
++		case *ast.GenDecl:
++			for _, s := range d.Specs {
++				switch s := s.(type) {
++				case *ast.TypeSpec:
++					add(s.Name)
++				case *ast.ValueSpec:
++					for _, name := range s.Names {
++						add(name)
++					}
++				}
++			}
++		}
++	}
++
++	return nil
++}
++
++// sharedResponse returns the shared response to use for a status code of the operation, if any.
++func (b *codeGenOpBuilder) sharedResponse(code int) *sharedResponse {
++	shared, ok := b.SharedResponses[code]
++	if !ok || shared.Key.Package != b.packageKey() {
++		return nil
++	}
++
++	return shared
++}
++
++func (b *codeGenOpBuilder) packageKey() string {
++	return operationPackageKey(
++		b.GenOpts.LanguageOpts.ManglePackageName(b.APIPackage, defaultOperationsTarget),
++		len(b.Operation.Tags) > 0 && !b.GenOpts.SkipTagPackages,
++	)
++}
++
++// makeSharedResponse builds a response of the operation which refers to a shared response.
++//
++// The type for this response is declared separately (see [GenSharedResponse]), and so are the schemas
++// which may be defined inline in this response: the declaration is kept aside by the builder.
++//
++// A shared response is built only once for all operations using it: building a schema registers the types
++// it defines inline, so building it again would resolve these as models instead.
++// Operations are built in a stable order, so the same operation always builds the response.
++func (b *codeGenOpBuilder) makeSharedResponse(receiver string, resolver *typeResolver, shared *sharedResponse, isSuccess bool, code int, resp spec.Response) (GenResponse, error) {
++	if b.sharedDeclarations == nil {
++		b.sharedDeclarations = make(map[int]sharedDeclaration)
++	}
++
++	if built, ok := b.builtSharedResponses[shared]; ok {
++		response := built.Response
++		response.ReceiverName = receiver
++		response.Method = b.Method
++		response.Path = b.Path
++		response.OperationName = b.Name
++		b.sharedDeclarations[code] = built
++
++		return response, nil
++	}
++
++	extraSchemas := b.ExtraSchemas
++	b.ExtraSchemas = nil
++	defer func() {
++		b.ExtraSchemas = extraSchemas
++	}()
++
++	response, err := b.MakeResponse(receiver, shared.Name, isSuccess, resolver, code, resp)
++	if err != nil {
++		return GenResponse{}, err
++	}
++	response.IsShared = true
++
++	// the declaration is common to all operations using this response
++	declared := response
++	declared.Method = ""
++	declared.Path = ""
++	declared.OperationName = ""
++
++	b.sharedDeclarations[code] = sharedDeclaration{
++		Response:     declared,
++		ExtraSchemas: gatherExtraSchemas(b.ExtraSchemas),
++	}
++	if b.builtSharedResponses != nil {
++		b.builtSharedResponses[shared] = b.sharedDeclarations[code]
++	}
++
++	return response, nil
++}
+diff --git a/generator/shared.go b/generator/shared.go
+index 8ad8525f..d467f83a 100644
+--- a/generator/shared.go
++++ b/generator/shared.go
+@@ -147,6 +147,29 @@ func DefaultSectionOpts(gen *GenOpts) {
+ 		}
+ 	}
+ 
++	if len(sec.SharedResponses) == 0 {
++		// responses shared by several operations of a package are declared once in this package
++		if gen.IsClient {
++			sec.SharedResponses = []TemplateOpts{
++				{
++					Name:     "sharedresponse",
++					Source:   "asset:clientSharedresponse",
++					Target:   "{{ joinFilePath .Target (toPackagePath .ClientPackage) (toPackagePath .Package) }}",
++					FileName: "{{ (snakize (pascalize .Name)) }}_responses.go",
++				},
++			}
++		} else if gen.IncludeResponses {
++			sec.SharedResponses = []TemplateOpts{
++				{
++					Name:     "sharedresponse",
++					Source:   "asset:serverSharedresponse",
++					Target:   operationTarget,
++					FileName: "{{ (snakize (pascalize .Name)) }}_responses.go",
++				},
++			}
++		}
++	}
++
+ 	if len(sec.OperationGroups) == 0 {
+ 		if gen.IsClient {
+ 			sec.OperationGroups = []TemplateOpts{
+@@ -295,6 +318,7 @@ type SectionOpts struct {
+ 	OperationGroups []TemplateOpts `mapstructure:"operation_groups"`
+ 	Models          []TemplateOpts `mapstructure:"models"`
+ 	PostModels      []TemplateOpts `mapstructure:"post_models"`
++	SharedResponses []TemplateOpts `mapstructure:"shared_responses"`
+ }
+ 
+ // overrideWith returns the receiver with each section replaced by the
+@@ -319,6 +343,9 @@ func (s SectionOpts) overrideWith(o SectionOpts) SectionOpts {
+ 	if len(o.PostModels) > 0 {
+ 		s.PostModels = o.PostModels
+ 	}
++	if len(o.SharedResponses) > 0 {
++		s.SharedResponses = o.SharedResponses
++	}
+ 
+ 	return s
+ }
+diff --git a/generator/spec.go b/generator/spec.go
+index d74d986d..f32d9028 100644
+--- a/generator/spec.go
++++ b/generator/spec.go
+@@ -30,6 +30,9 @@ type specAnalyzer struct {
+ 	*GenOpts
+ 
+ 	loader loads.DocLoader
++
++	// named responses referred to by operations, as found before flattening the spec
++	namedResponses namedResponses
+ }
+ 
+ func newSpecAnalyzer(g *GenOpts) *specAnalyzer {
+@@ -110,6 +113,10 @@ func (g *specAnalyzer) validateAndFlattenSpec() (*loads.Document, error) {
+ 	//
+ 	// The right place to fix these shortcomings is go-openapi/analysis.
+ 
++	// Flattening expands responses: remember beforehand which ones refer to a named response,
++	// so these may be shared by operations.
++	g.namedResponses = collectNamedResponses(specDoc, g.loader)
++
+ 	g.FlattenOpts.BasePath = specDoc.SpecFilePath()
+ 	g.FlattenOpts.Spec = analysis.New(specDoc.Spec())
+ 	g.FlattenOpts.PathLoaderWithOptions = g.loader
+diff --git a/generator/structs.go b/generator/structs.go
+index 72b45df0..10045db2 100644
+--- a/generator/structs.go
++++ b/generator/structs.go
+@@ -286,6 +286,32 @@ type GenResponse struct {
+ 	OperationName    string
+ 	Examples         GenResponseExamples
+ 	ReturnErrors     bool
++
++	// IsShared is true when this response is shared with other operations of the same package.
++	//
++	// The type for a shared response is not declared with the operation, but as a [GenSharedResponse].
++	IsShared bool
++}
++
++// GenSharedResponse represents the declaration of a response shared by several operations of the same package.
++//
++// This is a response defined in the "responses" section of the spec, which the operations
++// refer to under the same status code.
++type GenSharedResponse struct {
++	GenCommon
++
++	Package    string
++	Name       string
++	UseTags    bool
++	Operations []string
++
++	Response     GenResponse
++	ExtraSchemas GenSchemaList
++
++	DefaultImports map[string]string
++	Imports        map[string]string
++
++	StrictResponders bool
+ }
+ 
+ // GenResponseExamples is a sortable collection []GenResponseExample.
+@@ -545,6 +571,9 @@ type GenOperationGroup struct {
+ 	PackageAlias   string
+ 
+ 	ClientOptions *GenClientOptions
++
++	// SharedResponses are the declarations of the responses shared by operations of this group
++	SharedResponses []GenSharedResponse
+ }
+ 
+ // GenOperationGroups is a sorted collection of operation groups.
+diff --git a/generator/support.go b/generator/support.go
+index 21e8de3d..bc5e1c9f 100644
+--- a/generator/support.go
++++ b/generator/support.go
+@@ -9,9 +9,11 @@ import (
+ 	"errors"
+ 	"fmt"
+ 	"log"
++	"maps"
+ 	"os"
+ 	"path"
+ 	"path/filepath"
++	"slices"
+ 	"sort"
+ 
+ 	"github.com/go-openapi/analysis"
+@@ -87,8 +89,17 @@ type appGenerator struct {
+ 	DefaultConsumes   string
+ 	GenOpts           *GenOpts
+ 
++	// AllOperations are all the operations in the spec, whereas Operations may retain only a selection.
++	//
++	// Whether operations share a response doesn't depend on which operations are selected for generation.
++	AllOperations map[string]opRef
++	// NamedResponses are the named responses referred to by operations, before the spec was flattened.
++	NamedResponses namedResponses
++
+ 	mangler   mangling.NameMangler
+ 	mediaMime func(string) string
++
++	planning bool // builds an app only to find out which responses are shared
+ }
+ 
+ func newAppGenerator(name string, modelNames, operationIDs []string, opts *GenOpts) (*appGenerator, error) {
+@@ -96,7 +107,8 @@ func newAppGenerator(name string, modelNames, operationIDs []string, opts *GenOp
+ 		return nil, err
+ 	}
+ 
+-	specDoc, analyzed, err := newSpecAnalyzer(opts).analyzeSpec()
++	analyzer := newSpecAnalyzer(opts)
++	specDoc, analyzed, err := analyzer.analyzeSpec()
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -113,6 +125,19 @@ func newAppGenerator(name string, modelNames, operationIDs []string, opts *GenOp
+ 	}
+ 
+ 	opts.Name = appNameOrDefault(opts.LanguageOpts, specDoc, name, defaultServerName)
++
++	if opts.IncludeMain && opts.MainPackage == "" {
++		// default target for the generated main
++		opts.MainPackage = opts.LanguageOpts.Mangler.ToCommandName(mainNameOrDefault(opts.LanguageOpts, specDoc, name, defaultServerName) + "-server")
++	}
++
++	return serverAppGenerator(opts.Name, specDoc, analyzed, models, operations, analyzer.namedResponses, opts)
++}
++
++// serverAppGenerator builds an app generator for a server, from an analyzed spec.
++func serverAppGenerator(name string, specDoc *loads.Document, analyzed *analysis.Spec,
++	models map[string]spec.Schema, operations map[string]opRef, named namedResponses, opts *GenOpts,
++) (*appGenerator, error) {
+ 	mangler := opts.LanguageOpts.Mangler
+ 	funcMap := opts.funcMap
+ 	mediaMime, ok := funcMap["mediaTypeName"].(func(string) string)
+@@ -120,15 +145,10 @@ func newAppGenerator(name string, modelNames, operationIDs []string, opts *GenOp
+ 		return nil, errors.New("internal error: mediaTypeName function expected to be func(string) string")
+ 	}
+ 
+-	if opts.IncludeMain && opts.MainPackage == "" {
+-		// default target for the generated main
+-		opts.MainPackage = mangler.ToCommandName(mainNameOrDefault(opts.LanguageOpts, specDoc, name, defaultServerName) + "-server")
+-	}
+-
+ 	apiPackage := opts.LanguageOpts.ManglePackagePath(opts.APIPackage, defaultOperationsTarget)
+ 
+ 	return &appGenerator{
+-		Name:              opts.Name,
++		Name:              name,
+ 		Receiver:          "o",
+ 		SpecDoc:           specDoc,
+ 		Analyzed:          analyzed,
+@@ -147,6 +167,8 @@ func newAppGenerator(name string, modelNames, operationIDs []string, opts *GenOp
+ 		DefaultProduces:   opts.DefaultProduces,
+ 		DefaultConsumes:   opts.DefaultConsumes,
+ 		GenOpts:           opts,
++		AllOperations:     gatherOperations(opts, analyzed, nil),
++		NamedResponses:    named,
+ 		mangler:           mangler,
+ 		mediaMime:         mediaMime,
+ 	}, nil
+@@ -188,6 +210,12 @@ func (a *appGenerator) Generate() error {
+ 					return err
+ 				}
+ 			}
++			for _, sr := range opg.SharedResponses {
++				shared := sr
++				if err := newRenderer(a.GenOpts).renderSharedResponse(&shared); err != nil {
++					return err
++				}
++			}
+ 			// optional OperationGroups templates generation
+ 			if err := newRenderer(a.GenOpts).renderOperationGroup(&opg); err != nil {
+ 				return fmt.Errorf("error while rendering operation group: %w", err)
+@@ -253,8 +281,65 @@ func (a *appGenerator) makeSecuritySchemes() GenSecuritySchemes {
+ 	return gatherSecuritySchemes(requiredSecuritySchemes, a.Name, a.Principal, a.Receiver, principalIsNullable(a.GenOpts.Principal, a.GenOpts.PrincipalCustomIface))
+ }
+ 
+-//nolint:gocognit,gocyclo,cyclop,maintidx // TODO(fredbi): refactor
+ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
++	// operations of the same package share a type for the named responses they use under the same status code
++	plan, err := a.planSharedResponses()
++	if err != nil {
++		return GenApp{}, err
++	}
++
++	app, _, err := a.buildCodegenApp(plan)
++
++	return app, err
++}
++
++// planSharedResponses decides which responses are shared and how they are named.
++//
++// This considers all operations in the spec, not only the ones selected for generation.
++func (a *appGenerator) planSharedResponses() (*sharedResponsePlan, error) {
++	if a.planning || !a.NamedResponses.mayBeShared() {
++		return nil, nil //nolint:nilnil // nothing to share is not an error
++	}
++
++	// Building operations alters the spec: plan with a copy of the spec.
++	// Operations are built as if no response were shared, to find out which operations use which named response,
++	// and what else gets declared in their packages.
++	specDoc := a.SpecDoc.Pristine()
++	analyzed := analysis.New(specDoc.Spec())
++
++	all := *a
++	all.planning = true
++	all.SpecDoc = specDoc
++	all.Analyzed = analyzed
++	all.Models = nil // not needed to plan operations
++	all.Operations = gatherOperations(a.GenOpts, analyzed, nil)
++
++	app, builders, err := all.buildCodegenApp(nil)
++	if err != nil {
++		return nil, err
++	}
++
++	pristine := a.AllOperations
++	if len(pristine) == 0 {
++		pristine = a.Operations
++	}
++
++	planner := &sharedResponsePlanner{
++		opts:       a.GenOpts,
++		named:      a.NamedResponses,
++		app:        &app,
++		builders:   builders,
++		operations: pristine,
++		scanned:    make(map[string]*packageScan),
++	}
++
++	return planner.plan()
++}
++
++// buildCodegenApp builds the app to generate, possibly with some responses shared by operations.
++//
++// It returns the app and the builders used for each operation.
++func (a *appGenerator) buildCodegenApp(shared *sharedResponsePlan) (GenApp, map[string]codeGenOpBuilder, error) {
+ 	log.Println("building a plan for generation")
+ 
+ 	sw := a.SpecDoc.Spec()
+@@ -267,7 +352,6 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
+ 	log.Println("generation target", a.Target)
+ 
+ 	baseImport := a.GenOpts.LanguageOpts.BaseImport(a.Target)
+-	defaultImports := newImportsBuilder(a.GenOpts).defaultImports()
+ 
+ 	imports := make(map[string]string, sensibleDefaultMapAlloc)
+ 	alias := deconflictPkg(a.GenOpts.LanguageOpts.ManglePackageName(a.OperationsPackage, defaultOperationsTarget), renameAPIPackage)
+@@ -295,7 +379,7 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
+ 			a.GenOpts,
+ 		)
+ 		if err != nil {
+-			return GenApp{}, fmt.Errorf("error in model %s while planning definitions: %w", mn, err)
++			return GenApp{}, nil, fmt.Errorf("error in model %s while planning definitions: %w", mn, err)
+ 		}
+ 		if model != nil {
+ 			if !model.External {
+@@ -312,6 +396,105 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
+ 	}
+ 	sort.Sort(genModels)
+ 
++	operations, err := a.makeOperations(imports, shared)
++	if err != nil {
++		return GenApp{}, nil, err
++	}
++	genOps := operations.Operations
++	opGroups := operations.Groups
++	defaultImports := operations.DefaultImports
++
++	log.Println("planning meta data and facades")
++
++	var collectedSchemes, extraSchemes []string
++	for _, op := range genOps {
++		collectedSchemes = concatUnique(collectedSchemes, op.Schemes)
++		extraSchemes = concatUnique(extraSchemes, op.ExtraSchemes)
++	}
++	sort.Strings(collectedSchemes)
++	sort.Strings(extraSchemes)
++
++	host := "localhost"
++	if sw.Host != "" {
++		host = sw.Host
++	}
++
++	basePath := "/"
++	if sw.BasePath != "" {
++		basePath = sw.BasePath
++	}
++
++	jsonb, err := json.MarshalIndent(a.SpecDoc.OrigSpec(), "", "  ")
++	if err != nil {
++		return GenApp{}, nil, err
++	}
++	flatjsonb, err := json.MarshalIndent(a.SpecDoc.Spec(), "", "  ")
++	if err != nil {
++		return GenApp{}, nil, err
++	}
++
++	return GenApp{
++		GenCommon: GenCommon{
++			Copyright:        a.GenOpts.Copyright,
++			TargetImportPath: baseImport,
++		},
++		APIPackage:                 a.GenOpts.LanguageOpts.ManglePackageName(a.ServerPackage, defaultServerTarget),
++		APIPackageAlias:            alias,
++		ImplementationPackageAlias: implAlias,
++		Package:                    a.Package,
++		ReceiverName:               receiver,
++		Name:                       a.Name,
++		Host:                       host,
++		BasePath:                   basePath,
++		Schemes:                    schemeOrDefault(collectedSchemes, a.DefaultScheme),
++		ExtraSchemes:               extraSchemes,
++		ExternalDocs:               trimExternalDoc(sw.ExternalDocs),
++		Tags:                       trimTags(sw.Tags),
++		Info:                       trimInfo(sw.Info),
++		Consumes:                   consumes,
++		Produces:                   produces,
++		DefaultConsumes:            a.DefaultConsumes,
++		DefaultProduces:            a.DefaultProduces,
++		DefaultImports:             defaultImports,
++		Imports:                    imports,
++		SecurityDefinitions:        security,
++		SecurityRequirements:       securityRequirements(a.SpecDoc.Spec().Security), // top level securityRequirements
++		Models:                     genModels,
++		Operations:                 genOps,
++		OperationGroups:            opGroups,
++		Principal:                  principalAlias(a.GenOpts.Principal),
++		SwaggerJSON:                generateReadableSpec(jsonb),
++		FlatSwaggerJSON:            generateReadableSpec(flatjsonb),
++		ExcludeSpec:                a.GenOpts.ExcludeSpec,
++		GenOpts:                    a.GenOpts,
++
++		PrincipalIsNullable: principalIsNullable(a.GenOpts.Principal, a.GenOpts.PrincipalCustomIface),
++	}, operations.Builders, nil
++}
++
++// genOperations are the operations to generate, grouped by package.
++type genOperations struct {
++	Operations     GenOperations
++	Groups         GenOperationGroups
++	DefaultImports map[string]string
++	// Builders used for each operation, as they were before making the operation
++	Builders map[string]codeGenOpBuilder
++}
++
++// makeOperations builds the operations to generate and groups them in packages.
++//
++// With a plan for shared responses, operations refer to their shared responses and groups hold the
++// declarations of these.
++//
++//nolint:gocognit,gocyclo,cyclop,maintidx // TODO(fredbi): refactor
++func (a *appGenerator) makeOperations(imports map[string]string, shared *sharedResponsePlan) (genOperations, error) {
++	receiver := a.Receiver
++	baseImport := a.GenOpts.LanguageOpts.BaseImport(a.Target)
++	defaultImports := newImportsBuilder(a.GenOpts).defaultImports()
++	builders := make(map[string]codeGenOpBuilder, len(a.Operations))
++	declared := make(sharedResponseDeclarations)
++	builtSharedResponses := make(map[*sharedResponse]sharedDeclaration)
++
+ 	log.Printf("planning operations (found: %d)", len(a.Operations))
+ 
+ 	genOps := make(GenOperations, 0, len(a.Operations))
+@@ -319,7 +502,9 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
+ 	producesIndex := make(map[string][]string)
+ 	pristineDoc := a.SpecDoc.Pristine()
+ 
+-	for operationName, opp := range a.Operations {
++	// operations are built in a stable order
++	for _, operationName := range slices.Sorted(maps.Keys(a.Operations)) {
++		opp := a.Operations[operationName]
+ 		o := opp.Op
+ 		o.ID = operationName
+ 
+@@ -364,10 +549,15 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
+ 			continue
+ 		}
+ 
++		bldr.SharedResponses = shared.forOperation(operationName)
++		builders[operationName] = bldr
++		bldr.builtSharedResponses = builtSharedResponses
++
+ 		op, err := bldr.MakeOperation()
+ 		if err != nil {
+-			return GenApp{}, err
++			return genOperations{}, err
+ 		}
++		declared.collect(&bldr, op)
+ 
+ 		op.ReceiverName = receiver
+ 		op.Tags = tags // ordered tags for this operation, possibly filtered by CLI params
+@@ -460,6 +650,8 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
+ 			Imports:        imports,
+ 			RootPackage:    a.APIPackage,
+ 			GenOpts:        a.GenOpts,
++
++			SharedResponses: declared.forOperations(vv, imports, defaultImports),
+ 		}
+ 
+ 		if a.GenOpts.IsClient {
+@@ -478,71 +670,11 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
+ 	}
+ 	sort.Sort(opGroups)
+ 
+-	log.Println("planning meta data and facades")
+-
+-	var collectedSchemes, extraSchemes []string
+-	for _, op := range genOps {
+-		collectedSchemes = concatUnique(collectedSchemes, op.Schemes)
+-		extraSchemes = concatUnique(extraSchemes, op.ExtraSchemes)
+-	}
+-	sort.Strings(collectedSchemes)
+-	sort.Strings(extraSchemes)
+-
+-	host := "localhost"
+-	if sw.Host != "" {
+-		host = sw.Host
+-	}
+-
+-	basePath := "/"
+-	if sw.BasePath != "" {
+-		basePath = sw.BasePath
+-	}
+-
+-	jsonb, err := json.MarshalIndent(a.SpecDoc.OrigSpec(), "", "  ")
+-	if err != nil {
+-		return GenApp{}, err
+-	}
+-	flatjsonb, err := json.MarshalIndent(a.SpecDoc.Spec(), "", "  ")
+-	if err != nil {
+-		return GenApp{}, err
+-	}
+-
+-	return GenApp{
+-		GenCommon: GenCommon{
+-			Copyright:        a.GenOpts.Copyright,
+-			TargetImportPath: baseImport,
+-		},
+-		APIPackage:                 a.GenOpts.LanguageOpts.ManglePackageName(a.ServerPackage, defaultServerTarget),
+-		APIPackageAlias:            alias,
+-		ImplementationPackageAlias: implAlias,
+-		Package:                    a.Package,
+-		ReceiverName:               receiver,
+-		Name:                       a.Name,
+-		Host:                       host,
+-		BasePath:                   basePath,
+-		Schemes:                    schemeOrDefault(collectedSchemes, a.DefaultScheme),
+-		ExtraSchemes:               extraSchemes,
+-		ExternalDocs:               trimExternalDoc(sw.ExternalDocs),
+-		Tags:                       trimTags(sw.Tags),
+-		Info:                       trimInfo(sw.Info),
+-		Consumes:                   consumes,
+-		Produces:                   produces,
+-		DefaultConsumes:            a.DefaultConsumes,
+-		DefaultProduces:            a.DefaultProduces,
+-		DefaultImports:             defaultImports,
+-		Imports:                    imports,
+-		SecurityDefinitions:        security,
+-		SecurityRequirements:       securityRequirements(a.SpecDoc.Spec().Security), // top level securityRequirements
+-		Models:                     genModels,
+-		Operations:                 genOps,
+-		OperationGroups:            opGroups,
+-		Principal:                  principalAlias(a.GenOpts.Principal),
+-		SwaggerJSON:                generateReadableSpec(jsonb),
+-		FlatSwaggerJSON:            generateReadableSpec(flatjsonb),
+-		ExcludeSpec:                a.GenOpts.ExcludeSpec,
+-		GenOpts:                    a.GenOpts,
+-
+-		PrincipalIsNullable: principalIsNullable(a.GenOpts.Principal, a.GenOpts.PrincipalCustomIface),
++	return genOperations{
++		Operations:     genOps,
++		Groups:         opGroups,
++		DefaultImports: defaultImports,
++		Builders:       builders,
+ 	}, nil
+ }
+ 
+diff --git a/generator/template_repo.go b/generator/template_repo.go
+index 76304077..459a3b16 100644
+--- a/generator/template_repo.go
++++ b/generator/template_repo.go
+@@ -163,6 +163,7 @@ func defaultAssets() map[string][]byte {
+ 		"server/parameter.gotmpl":        MustAsset("templates/server/parameter.gotmpl"),
+ 		"server/urlbuilder.gotmpl":       MustAsset("templates/server/urlbuilder.gotmpl"),
+ 		"server/responses.gotmpl":        MustAsset("templates/server/responses.gotmpl"),
++		"server/sharedresponse.gotmpl":   MustAsset("templates/server/sharedresponse.gotmpl"),
+ 		"server/operation.gotmpl":        MustAsset("templates/server/operation.gotmpl"),
+ 		"server/builder.gotmpl":          MustAsset("templates/server/builder.gotmpl"),
+ 		"server/server.gotmpl":           MustAsset("templates/server/server.gotmpl"),
+@@ -172,10 +173,11 @@ func defaultAssets() map[string][]byte {
+ 		"server/doc.gotmpl":              MustAsset("templates/server/doc.gotmpl"),
+ 
+ 		// client templates
+-		"client/parameter.gotmpl": MustAsset("templates/client/parameter.gotmpl"),
+-		"client/response.gotmpl":  MustAsset("templates/client/response.gotmpl"),
+-		"client/client.gotmpl":    MustAsset("templates/client/client.gotmpl"),
+-		"client/facade.gotmpl":    MustAsset("templates/client/facade.gotmpl"),
++		"client/parameter.gotmpl":      MustAsset("templates/client/parameter.gotmpl"),
++		"client/response.gotmpl":       MustAsset("templates/client/response.gotmpl"),
++		"client/sharedresponse.gotmpl": MustAsset("templates/client/sharedresponse.gotmpl"),
++		"client/client.gotmpl":         MustAsset("templates/client/client.gotmpl"),
++		"client/facade.gotmpl":         MustAsset("templates/client/facade.gotmpl"),
+ 
+ 		"markdown/docs.gotmpl": MustAsset("templates/markdown/docs.gotmpl"),
+ 
+diff --git a/generator/templates/client/response.gotmpl b/generator/templates/client/response.gotmpl
+index fff957d2..1c93bca7 100644
+--- a/generator/templates/client/response.gotmpl
++++ b/generator/templates/client/response.gotmpl
+@@ -120,14 +120,14 @@ func ({{ .ReceiverName }} *{{ pascalize .Name }}) Error() string {
+   {{- if .Schema }}{{ if (not .Schema.IsStream) }}
+   payload, _ := json.Marshal(o.Payload)
+   {{- end }}{{- end }}
+-	return fmt.Sprintf("[{{ upper .Method }} {{ escapeDoubleQuoted .Path }}][%d]{{ if .Name }} {{ .Name }}{{ else }} unknown error{{ end }}{{ if .Schema }}{{ if not .Schema.IsStream }} %s{{ end }}{{ end }}", {{ if eq .Code -1 }}{{ .ReceiverName }}._statusCode{{ else }}{{ .Code }}{{ end }}{{ if .Schema }}{{ if not .Schema.IsStream }}, payload{{ end }}{{ end }})
++	return fmt.Sprintf("{{ if not .IsShared }}[{{ upper .Method }} {{ escapeDoubleQuoted .Path }}]{{ end }}[%d]{{ if .Name }} {{ .Name }}{{ else }} unknown error{{ end }}{{ if .Schema }}{{ if not .Schema.IsStream }} %s{{ end }}{{ end }}", {{ if eq .Code -1 }}{{ .ReceiverName }}._statusCode{{ else }}{{ .Code }}{{ end }}{{ if .Schema }}{{ if not .Schema.IsStream }}, payload{{ end }}{{ end }})
+ }
+ 
+ func ({{ .ReceiverName }} *{{ pascalize .Name }}) String() string {
+   {{- if .Schema }}{{ if (not .Schema.IsStream) }}
+   payload, _ := json.Marshal(o.Payload)
+   {{- end }}{{- end }}
+-	return fmt.Sprintf("[{{ upper .Method }} {{ escapeDoubleQuoted .Path }}][%d]{{ if .Name }} {{ .Name }}{{ else }} unknown response{{ end }}{{ if .Schema }}{{ if not .Schema.IsStream }} %s{{ end }}{{ end }}", {{ if eq .Code -1 }}{{ .ReceiverName }}._statusCode{{ else }}{{ .Code }}{{ end }}{{ if .Schema }}{{ if not .Schema.IsStream }}, payload{{ end }}{{ end }})
++	return fmt.Sprintf("{{ if not .IsShared }}[{{ upper .Method }} {{ escapeDoubleQuoted .Path }}]{{ end }}[%d]{{ if .Name }} {{ .Name }}{{ else }} unknown response{{ end }}{{ if .Schema }}{{ if not .Schema.IsStream }} %s{{ end }}{{ end }}", {{ if eq .Code -1 }}{{ .ReceiverName }}._statusCode{{ else }}{{ .Code }}{{ end }}{{ if .Schema }}{{ if not .Schema.IsStream }}, payload{{ end }}{{ end }})
+ }
+ 
+ {{ if .Schema }}
+@@ -289,10 +289,14 @@ func ({{ .ReceiverName }} *{{ pascalize .Name }}Reader) ReadResponse(response ru
+ }
+ 
+ {{ range .Responses }}
++  {{- if not .IsShared }}{{/* the type for a shared response is declared elsewhere in this package */}}
+   {{ template "clientresponse" . }}
++  {{- end }}
+ {{ end }}
+ {{ if .DefaultResponse }}
++  {{- if not .DefaultResponse.IsShared }}
+   {{ template "clientresponse" .DefaultResponse }}
++  {{- end }}
+ {{ end }}
+ 
+ {{ range .ExtraSchemas }}
+diff --git a/generator/templates/client/sharedresponse.gotmpl b/generator/templates/client/sharedresponse.gotmpl
+new file mode 100644
+index 00000000..14990da6
+--- /dev/null
++++ b/generator/templates/client/sharedresponse.gotmpl
+@@ -0,0 +1,38 @@
++{{"// Code generated by go-swagger; DO NOT EDIT."}}
++
++
++{{ if .Copyright -}}{{ lineComment .Copyright -}}{{ end }}
++
++
++package {{ .Package }}
++
++// This file declares the {{ humanize .Name }} response, which is shared by several operations:
++{{- range .Operations }}
++//   - {{ pascalize . }}
++{{- end }}
++
++import (
++  stderrors "errors"
++  "io"
++  "net/http"
++
++  "github.com/go-openapi/errors"
++  "github.com/go-openapi/runtime"
++  "github.com/go-openapi/strfmt"
++  "github.com/go-openapi/swag/conv"
++  "github.com/go-openapi/swag/jsonutils"
++  "github.com/go-openapi/swag/stringutils"
++  "github.com/go-openapi/swag/typeutils"
++  "github.com/go-openapi/validate"
++  {{ imports .DefaultImports }}
++  {{ imports .Imports }}
++)
++
++{{ template "clientresponse" .Response }}
++
++{{ range .ExtraSchemas }}
++{{ template "docstring" (dict "Ctx" . "Lead" (printf "%s " .GoName)) }}
++//
++// swagger:model {{ .Name }}
++  {{- template "schema" . }}
++{{- end }}
+diff --git a/generator/templates/server/responses.gotmpl b/generator/templates/server/responses.gotmpl
+index e1f458da..217bf858 100644
+--- a/generator/templates/server/responses.gotmpl
++++ b/generator/templates/server/responses.gotmpl
+@@ -214,7 +214,14 @@ func ({{ .ReceiverName }} *{{ pascalize .Name }}) WriteResponse(rw http.Response
+   {{- end }}
+ }
+ 
+-{{ if $.StrictResponders }}
++{{ if and $.StrictResponders (not .IsShared) }}
++func ({{ .ReceiverName }} *{{ pascalize .Name }}) {{ pascalize .OperationName }}Responder() {}
++{{- end }}
++{{ end }}
++{{ define "serversharedresponse" }}
++{{- /* the type for a shared response is declared elsewhere in this package */ -}}
++{{ if .StrictResponders }}
++// {{ pascalize .OperationName }}Responder marks {{ pascalize .Name }} as a response to the {{ humanize .OperationName }} operation
+ func ({{ .ReceiverName }} *{{ pascalize .Name }}) {{ pascalize .OperationName }}Responder() {}
+ {{- end }}
+ {{ end }}{{"// Code generated by go-swagger; DO NOT EDIT."}}
+@@ -243,10 +250,10 @@ import (
+ )
+ 
+ {{ range .Responses }}
+-{{ template "serverresponse" . }}
++{{ if .IsShared }}{{ template "serversharedresponse" . }}{{ else }}{{ template "serverresponse" . }}{{ end }}
+ {{ end }}
+ {{ if .DefaultResponse }}
+-{{ template "serverresponse" .DefaultResponse }}
++{{ if .DefaultResponse.IsShared }}{{ template "serversharedresponse" .DefaultResponse }}{{ else }}{{ template "serverresponse" .DefaultResponse }}{{ end }}
+ {{ end }}
+ 
+ {{ if $.StrictResponders }}
+diff --git a/generator/templates/server/sharedresponse.gotmpl b/generator/templates/server/sharedresponse.gotmpl
+new file mode 100644
+index 00000000..91c161b9
+--- /dev/null
++++ b/generator/templates/server/sharedresponse.gotmpl
+@@ -0,0 +1,42 @@
++{{"// Code generated by go-swagger; DO NOT EDIT."}}
++
++
++{{ if .Copyright -}}{{ lineComment .Copyright -}}{{ end }}
++
++
++package {{ .Package }}
++
++// This file declares the {{ humanize .Name }} response, which is shared by several operations:
++{{- range .Operations }}
++//   - {{ pascalize . }}
++{{- end }}
++
++import (
++  {{- if .ExtraSchemas }}
++  stderrors "errors"
++  {{- end }}
++  "fmt"
++  "net/http"
++
++  "github.com/go-openapi/errors"
++  "github.com/go-openapi/runtime"
++  "github.com/go-openapi/runtime/middleware"
++  "github.com/go-openapi/runtime/security"
++  "github.com/go-openapi/strfmt"
++  "github.com/go-openapi/swag/conv"
++  "github.com/go-openapi/swag/jsonutils"
++  "github.com/go-openapi/swag/stringutils"
++  "github.com/go-openapi/swag/typeutils"
++  "github.com/go-openapi/validate"
++  {{ imports .DefaultImports }}
++  {{ imports .Imports }}
++)
++
++{{ template "serverresponse" .Response }}
++
++{{ range .ExtraSchemas }}
++{{ template "docstring" (dict "Ctx" . "Lead" (printf "%s " .GoName)) }}
++//
++// swagger:model {{ .Name }}
++  {{- template "schema" . }}
++{{- end }}
