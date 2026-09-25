@@ -1,0 +1,42 @@
+== build steps (network)
+== apply test patch
+before-base-1            mode=base rc=0 tests=912 failures=0 errors=0 skipped=0
+before-new-1             mode=new  rc=1 tests=15 failures=15 errors=0 skipped=0
+before-base-2            mode=base rc=0 tests=912 failures=0 errors=0 skipped=0
+before-new-2             mode=new  rc=1 tests=15 failures=15 errors=0 skipped=0
+before-base-3            mode=base rc=0 tests=912 failures=0 errors=0 skipped=0
+before-new-3             mode=new  rc=1 tests=15 failures=15 errors=0 skipped=0
+before-base-4            mode=base rc=0 tests=912 failures=0 errors=0 skipped=0
+before-new-4             mode=new  rc=1 tests=15 failures=15 errors=0 skipped=0
+before-base-5            mode=base rc=0 tests=912 failures=0 errors=0 skipped=0
+before-new-5             mode=new  rc=1 tests=15 failures=15 errors=0 skipped=0
+== apply solution patch
+after-base-1             mode=base rc=0 tests=912 failures=0 errors=0 skipped=0
+after-new-1              mode=new  rc=0 tests=15 failures=0 errors=0 skipped=0
+after-base-2             mode=base rc=0 tests=912 failures=0 errors=0 skipped=0
+after-new-2              mode=new  rc=0 tests=15 failures=0 errors=0 skipped=0
+after-base-3             mode=base rc=0 tests=912 failures=0 errors=0 skipped=0
+after-new-3              mode=new  rc=0 tests=15 failures=0 errors=0 skipped=0
+after-base-4             mode=base rc=0 tests=912 failures=0 errors=0 skipped=0
+after-new-4              mode=new  rc=0 tests=15 failures=0 errors=0 skipped=0
+after-base-5             mode=base rc=0 tests=912 failures=0 errors=0 skipped=0
+after-new-5              mode=new  rc=0 tests=15 failures=0 errors=0 skipped=0
+ M docs/generate/client.md
+ M docs/generate/server.md
+ M docs/reference/templates/template_layout.md
+ M generator/client.go
+ M generator/operation.go
+ M generator/renderer.go
+ M generator/shared.go
+ M generator/spec.go
+ M generator/structs.go
+ M generator/support.go
+ M generator/template_repo.go
+ M generator/templates/client/response.gotmpl
+ M generator/templates/server/responses.gotmpl
+?? fixtures/enhancements/shared-responses-5d81c9/
+?? generator/response_sharing.go
+?? generator/shared_responses_d4e7a1_test.go
+?? generator/templates/client/sharedresponse.gotmpl
+?? generator/templates/server/sharedresponse.gotmpl
+?? test.sh

@@ -1,0 +1,29 @@
+M01 no capture of named responses before flatten: KILLED ['BuildVariants', 'ClientBehavior', 'FromOtherDocuments', 'KeepStatusCodes', 'NameCollisions', 'PerPack
+M02 share across status codes (group ignores code): KILLED ['BuildVariants', 'ClientBehavior', 'FromOtherDocuments', 'KeepStatusCodes', 'NameCollisions', 'PerPa
+M03 default response never shared: KILLED ['BuildVariants', 'ClientBehavior', 'KeepStatusCodes', 'NameCollisions', 'PerPackage', 'SingleOperations', 'WithinPack
+M04 share across packages (group ignores package): KILLED ['PerPackage', 'SingleOperationInTaggedPackage']
+M05 share responses used by a single operation: KILLED ['WithinPackage']
+M06 identify named responses by name only: KILLED ['FromOtherDocuments']
+M07 identify named responses by x-go-name (merge responses with the same Go name): KILLED ['KeepStatusCodes']
+M08 plan from selected operations only: KILLED ['BuildVariants', 'ClientBehavior', 'SelectedClientOperations', 'SingleOperations', 'WithinPackage']
+M09 no name conflict detection: KILLED ['KeepStatusCodes', 'NameCollisions']
+M12 conflicts ignore file names: KILLED ['NameCollisions']
+M13 conflicts between shared responses not checked: KILLED ['KeepStatusCodes', 'NameCollisions']
+M14 client op files still declare shared responses: KILLED ['BuildVariants', 'ClientBehavior', 'FromOtherDocuments', 'KeepStatusCodes', 'NameCollisions', 'PerPa
+M15 server strict marker not emitted for shared responses: KILLED ['NameCollisions', 'SingleOperationInTaggedPackage', 'SingleOperations']
+M16 no shared declaration section for clients: KILLED ['BuildVariants', 'ClientBehavior', 'FromOtherDocuments', 'KeepStatusCodes', 'NameCollisions', 'PerPackage
+M17 inline schemas of shared responses kept with operations: KILLED ['BuildVariants', 'ClientBehavior', 'FromOtherDocuments', 'KeepStatusCodes', 'NameCollisions
+M18 generate operation does not render shared declarations: KILLED ['SingleOperationInTaggedPackage', 'SingleOperations']
+M19 sharing planned from the operations selected for generation: KILLED ['SelectedClientOperations', 'SingleOperationInTaggedPackage', 'SingleOperations']
+M20 per-operation x-go-name duplicates not partitioned: KILLED ['KeepStatusCodes']
+M21 path items defined in other documents ignored: KILLED ['FromOtherDocuments']
+M22 refs not normalized (raw ref string as identity): KILLED ['FromOtherDocuments']
+M23 shared response rebuilt for each operation, last one wins: KILLED ['BuildVariants', 'ClientBehavior', 'WithinPackage']
+M24 operations built in map order: KILLED ['BuildVariants']
+M26 default response shared with the 500 response: KILLED ['BuildVariants', 'ClientBehavior', 'KeepStatusCodes', 'NameCollisions', 'PerPackage', 'SingleOperatio
+M27 declarations only rendered for the first package: KILLED ['PerPackage']
+M28 shared declarations always rendered in the root package of operations: KILLED ['PerPackage', 'SingleOperationInTaggedPackage']
+M29 strict marker only for the operation that built the shared response: KILLED ['BuildVariants', 'ClientBehavior', 'FromOtherDocuments', 'KeepStatusCodes', 'Na
+M25 shared declaration built from an empty response: KILLED ['ClientBehavior']
+M10 conflicts with operations only (no app-level templates): KILLED ['NameCollisions']
+M11 conflicts ignore operation group templates: KILLED ['NameCollisions']
