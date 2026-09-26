@@ -7,7 +7,7 @@
 - Category: Feature Request
 - Language: Go
 - Difficulty: hard
-- Files: description.md, test.patch, solution.patch, Dockerfile, test.sh
+- Files: description.md, test.patch, solution.patch (code only: docs/ is excluded by the repo .dockerignore), Dockerfile, test.sh
 
 Run: `./test.sh --output_path results.xml base|new`
 - base: every test of ./generator/... except `TestSharedNamedResponses*` and the network-bound

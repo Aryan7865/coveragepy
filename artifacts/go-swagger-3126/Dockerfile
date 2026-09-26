@@ -13,6 +13,13 @@ RUN go mod download && \
     go build ./... && \
     go install gotest.tools/gotestsum@v1.13.0
 
+# The fixtures used by the tests are left out of the build context by .dockerignore:
+# restore them from the module source at the same commit.
+RUN cd /tmp && \
+    SRC=$(go mod download -json github.com/go-swagger/go-swagger@435dc19b1c0a94ed6aa68e36e9918eb45b9f7049 | sed -n 's/^[[:space:]]*"Dir": "\(.*\)",$/\1/p') && \
+    test -n "$SRC" && test -d "$SRC/fixtures" && \
+    rm -rf /app/fixtures && cp -R "$SRC/fixtures" /app/fixtures && chmod -R u+w /app/fixtures
+
 # Some tests build the code generated for a server, a client and a command line client,
 # in a module requiring the same dependencies as this repository: fill the module cache
 # with the dependencies of generated code, so these builds work without network.
