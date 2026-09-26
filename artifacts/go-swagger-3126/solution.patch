@@ -35,7 +35,7 @@ index 4a618ecc..942ee0eb 100644
  				return err
  			}
 diff --git a/generator/operation.go b/generator/operation.go
-index 67f5b7a5..0b83a2d4 100644
+index 67f5b7a5..526e6ebb 100644
 --- a/generator/operation.go
 +++ b/generator/operation.go
 @@ -18,7 +18,6 @@ import (
@@ -154,11 +154,15 @@ index 67f5b7a5..0b83a2d4 100644
  }
  
  //nolint:gocognit,gocyclo,cyclop,maintidx // TODO(fredbi): refactor
-@@ -322,23 +376,35 @@ func (b *codeGenOpBuilder) MakeOperation() (GenOperation, error) {
+@@ -322,23 +376,39 @@ func (b *codeGenOpBuilder) MakeOperation() (GenOperation, error) {
  	var defaultResponse *GenResponse
  	var successResponses []GenResponse
  	if operation.Responses != nil {
-+		responseNames := make(map[string]bool, len(srs))
++		responseNames := make(map[string]bool, len(srs)+1)
++		if operation.Responses.Default != nil {
++			// the default response keeps its name: other responses named "default" are qualified by their status
++			responseNames[mangler.ToJSONName(b.Name+" default")] = true
++		}
  		for _, v := range srs {
  			name, ok := v.Response.Extensions.GetString(xGoName)
  			if !ok {
@@ -196,7 +200,7 @@ index 67f5b7a5..0b83a2d4 100644
  			if err != nil {
  				return GenOperation{}, err
  			}
-@@ -349,7 +415,15 @@ func (b *codeGenOpBuilder) MakeOperation() (GenOperation, error) {
+@@ -349,7 +419,15 @@ func (b *codeGenOpBuilder) MakeOperation() (GenOperation, error) {
  		}
  
  		if operation.Responses.Default != nil {
@@ -241,10 +245,10 @@ index 71bcbeca..0ed66de7 100644
  	for _, tp := range g.Sections.Models {
 diff --git a/generator/response_sharing.go b/generator/response_sharing.go
 new file mode 100644
-index 00000000..ffccdf4a
+index 00000000..943987d0
 --- /dev/null
 +++ b/generator/response_sharing.go
-@@ -0,0 +1,885 @@
+@@ -0,0 +1,886 @@
 +// SPDX-FileCopyrightText: Copyright 2015-2025 go-swagger maintainers
 +// SPDX-License-Identifier: Apache-2.0
 +
@@ -285,12 +289,7 @@ index 00000000..ffccdf4a
 +// the layout. Its content doesn't depend on which operations are selected for generation: generating a subset of
 +// the operations (or a single operation) produces the same declaration as a full generation.
 +
-+const (
-+	defaultResponseCode = -1
-+
-+	// maxSharedResponseCandidates bounds the attempts to find a free name for a shared response.
-+	maxSharedResponseCandidates = 100
-+)
++const defaultResponseCode = -1
 +
 +// namedResponse identifies a response from the "responses" section of a spec document.
 +type namedResponse struct {
@@ -761,7 +760,8 @@ index 00000000..ffccdf4a
 +	base := group.baseName(qualifyWithCode)
 +	representative := group.operations[0]
 +
-+	for attempt := range maxSharedResponseCandidates {
++	// the names declared in a package are finite: some candidate is eventually free
++	for attempt := 0; ; attempt++ {
 +		candidate := base
 +		switch attempt {
 +		case 0:
@@ -816,8 +816,6 @@ index 00000000..ffccdf4a
 +
 +		return shared, nil
 +	}
-+
-+	return nil, fmt.Errorf("could not find a name for the response %s shared by operations %v", group.named.ID, group.operations)
 +}
 +
 +// declare builds the declaration of a shared response, from one of the operations using it.
@@ -1006,6 +1004,13 @@ index 00000000..ffccdf4a
 +
 +	for i := range p.app.OperationGroups {
 +		if err := locate(p.opts.Sections.OperationGroups, &p.app.OperationGroups[i]); err != nil {
++			return err
++		}
++	}
++
++	// models may be generated into the same package as operations
++	for i := range p.app.Models {
++		if err := locate(p.opts.Sections.Models, &p.app.Models[i]); err != nil {
 +			return err
 +		}
 +	}
@@ -1255,10 +1260,10 @@ index 72b45df0..10045db2 100644
  
  // GenOperationGroups is a sorted collection of operation groups.
 diff --git a/generator/support.go b/generator/support.go
-index 21e8de3d..bc5e1c9f 100644
+index 21e8de3d..5acb3067 100644
 --- a/generator/support.go
 +++ b/generator/support.go
-@@ -9,9 +9,11 @@ import (
+@@ -9,10 +9,13 @@ import (
  	"errors"
  	"fmt"
  	"log"
@@ -1268,9 +1273,11 @@ index 21e8de3d..bc5e1c9f 100644
  	"path/filepath"
 +	"slices"
  	"sort"
++	"strings"
  
  	"github.com/go-openapi/analysis"
-@@ -87,8 +89,17 @@ type appGenerator struct {
+ 	"github.com/go-openapi/loads"
+@@ -87,8 +90,17 @@ type appGenerator struct {
  	DefaultConsumes   string
  	GenOpts           *GenOpts
  
@@ -1288,7 +1295,7 @@ index 21e8de3d..bc5e1c9f 100644
  }
  
  func newAppGenerator(name string, modelNames, operationIDs []string, opts *GenOpts) (*appGenerator, error) {
-@@ -96,7 +107,8 @@ func newAppGenerator(name string, modelNames, operationIDs []string, opts *GenOp
+@@ -96,7 +108,8 @@ func newAppGenerator(name string, modelNames, operationIDs []string, opts *GenOp
  		return nil, err
  	}
  
@@ -1298,7 +1305,7 @@ index 21e8de3d..bc5e1c9f 100644
  	if err != nil {
  		return nil, err
  	}
-@@ -113,6 +125,19 @@ func newAppGenerator(name string, modelNames, operationIDs []string, opts *GenOp
+@@ -113,6 +126,19 @@ func newAppGenerator(name string, modelNames, operationIDs []string, opts *GenOp
  	}
  
  	opts.Name = appNameOrDefault(opts.LanguageOpts, specDoc, name, defaultServerName)
@@ -1318,7 +1325,7 @@ index 21e8de3d..bc5e1c9f 100644
  	mangler := opts.LanguageOpts.Mangler
  	funcMap := opts.funcMap
  	mediaMime, ok := funcMap["mediaTypeName"].(func(string) string)
-@@ -120,15 +145,10 @@ func newAppGenerator(name string, modelNames, operationIDs []string, opts *GenOp
+@@ -120,15 +146,10 @@ func newAppGenerator(name string, modelNames, operationIDs []string, opts *GenOp
  		return nil, errors.New("internal error: mediaTypeName function expected to be func(string) string")
  	}
  
@@ -1335,7 +1342,7 @@ index 21e8de3d..bc5e1c9f 100644
  		Receiver:          "o",
  		SpecDoc:           specDoc,
  		Analyzed:          analyzed,
-@@ -147,6 +167,8 @@ func newAppGenerator(name string, modelNames, operationIDs []string, opts *GenOp
+@@ -147,6 +168,8 @@ func newAppGenerator(name string, modelNames, operationIDs []string, opts *GenOp
  		DefaultProduces:   opts.DefaultProduces,
  		DefaultConsumes:   opts.DefaultConsumes,
  		GenOpts:           opts,
@@ -1344,7 +1351,7 @@ index 21e8de3d..bc5e1c9f 100644
  		mangler:           mangler,
  		mediaMime:         mediaMime,
  	}, nil
-@@ -188,6 +210,12 @@ func (a *appGenerator) Generate() error {
+@@ -188,6 +211,12 @@ func (a *appGenerator) Generate() error {
  					return err
  				}
  			}
@@ -1357,7 +1364,7 @@ index 21e8de3d..bc5e1c9f 100644
  			// optional OperationGroups templates generation
  			if err := newRenderer(a.GenOpts).renderOperationGroup(&opg); err != nil {
  				return fmt.Errorf("error while rendering operation group: %w", err)
-@@ -253,8 +281,65 @@ func (a *appGenerator) makeSecuritySchemes() GenSecuritySchemes {
+@@ -253,8 +282,90 @@ func (a *appGenerator) makeSecuritySchemes() GenSecuritySchemes {
  	return gatherSecuritySchemes(requiredSecuritySchemes, a.Name, a.Principal, a.Receiver, principalIsNullable(a.GenOpts.Principal, a.GenOpts.PrincipalCustomIface))
  }
  
@@ -1392,8 +1399,15 @@ index 21e8de3d..bc5e1c9f 100644
 +	all.planning = true
 +	all.SpecDoc = specDoc
 +	all.Analyzed = analyzed
-+	all.Models = nil // not needed to plan operations
 +	all.Operations = gatherOperations(a.GenOpts, analyzed, nil)
++	all.Models = nil // only needed when models are generated in the packages of operations
++	if a.modelsInOperationPackages() {
++		models, err := gatherModels(specDoc, nil)
++		if err != nil {
++			return nil, err
++		}
++		all.Models = models
++	}
 +
 +	app, builders, err := all.buildCodegenApp(nil)
 +	if err != nil {
@@ -1417,6 +1431,24 @@ index 21e8de3d..bc5e1c9f 100644
 +	return planner.plan()
 +}
 +
++// modelsInOperationPackages tells if models are generated in the package of operations, or in one of its tag packages.
++func (a *appGenerator) modelsInOperationPackages() bool {
++	lang := a.GenOpts.LanguageOpts
++	models := lang.ManglePackagePath(a.GenOpts.ModelPackage, defaultModelsTarget)
++
++	var operations string
++	if a.GenOpts.IsClient {
++		operations = lang.ManglePackagePath(a.GenOpts.ClientPackage, defaultClientTarget)
++	} else {
++		operations = path.Join(
++			lang.ManglePackagePath(a.GenOpts.ServerPackage, defaultServerTarget),
++			lang.ManglePackagePath(a.GenOpts.APIPackage, defaultOperationsTarget),
++		)
++	}
++
++	return models == operations || strings.HasPrefix(models, operations+"/")
++}
++
 +// buildCodegenApp builds the app to generate, possibly with some responses shared by operations.
 +//
 +// It returns the app and the builders used for each operation.
@@ -1424,7 +1456,7 @@ index 21e8de3d..bc5e1c9f 100644
  	log.Println("building a plan for generation")
  
  	sw := a.SpecDoc.Spec()
-@@ -267,7 +352,6 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
+@@ -267,7 +378,6 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
  	log.Println("generation target", a.Target)
  
  	baseImport := a.GenOpts.LanguageOpts.BaseImport(a.Target)
@@ -1432,7 +1464,7 @@ index 21e8de3d..bc5e1c9f 100644
  
  	imports := make(map[string]string, sensibleDefaultMapAlloc)
  	alias := deconflictPkg(a.GenOpts.LanguageOpts.ManglePackageName(a.OperationsPackage, defaultOperationsTarget), renameAPIPackage)
-@@ -295,7 +379,7 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
+@@ -295,7 +405,7 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
  			a.GenOpts,
  		)
  		if err != nil {
@@ -1441,7 +1473,7 @@ index 21e8de3d..bc5e1c9f 100644
  		}
  		if model != nil {
  			if !model.External {
-@@ -312,6 +396,105 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
+@@ -312,6 +422,105 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
  	}
  	sort.Sort(genModels)
  
@@ -1547,7 +1579,7 @@ index 21e8de3d..bc5e1c9f 100644
  	log.Printf("planning operations (found: %d)", len(a.Operations))
  
  	genOps := make(GenOperations, 0, len(a.Operations))
-@@ -319,7 +502,9 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
+@@ -319,7 +528,9 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
  	producesIndex := make(map[string][]string)
  	pristineDoc := a.SpecDoc.Pristine()
  
@@ -1558,7 +1590,7 @@ index 21e8de3d..bc5e1c9f 100644
  		o := opp.Op
  		o.ID = operationName
  
-@@ -364,10 +549,15 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
+@@ -364,10 +575,15 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
  			continue
  		}
  
@@ -1575,7 +1607,7 @@ index 21e8de3d..bc5e1c9f 100644
  
  		op.ReceiverName = receiver
  		op.Tags = tags // ordered tags for this operation, possibly filtered by CLI params
-@@ -460,6 +650,8 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
+@@ -460,6 +676,8 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
  			Imports:        imports,
  			RootPackage:    a.APIPackage,
  			GenOpts:        a.GenOpts,
@@ -1584,7 +1616,7 @@ index 21e8de3d..bc5e1c9f 100644
  		}
  
  		if a.GenOpts.IsClient {
-@@ -478,71 +670,11 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
+@@ -478,71 +696,11 @@ func (a *appGenerator) makeCodegenApp() (GenApp, error) {
  	}
  	sort.Sort(opGroups)
  
